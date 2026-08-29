@@ -12,11 +12,14 @@
 | --- | --- | --- | --- |
 | 鸟目标检测 | YOLO11n（ONNX） | 当前 640 px 视觉基线，提高小鸟、密集目标召回 | Ultralytics 权重受 AGPL-3.0/企业许可约束，商业发布前必须处理 |
 | 多目标追踪 | ByteTrack 风格 tracker | 高低置信度两阶段关联，并用速度预测跨越短暂漏检 | 当前实现无 Kalman filter；生产版仍需针对遮挡数据评测 |
-| 视觉物种分类 | EfficientNet Birds-525（ONNX） | 已接入；裁剪稳定追踪框后输出三个候选 | MIT；训练集物种和地域有限，实验准确率不能代表野外画面 |
-| 鸟声分类 | BirdNET TFJS | 已接入 3 秒窗口、48 kHz、本地实时分类和中文标签 | 官方网页代码 MIT，模型 CC BY-SA 4.0；发布前复核署名与衍生条款 |
+| 视觉物种分类 | China Birds ConvNeXt Base（ONNX） | 已接入；373 种中国常见鸟类，裁剪稳定追踪框后输出三个候选 | MIT；12M 参数，公开测试 Top-1 62.16% / Top-3 74.87% |
+| 鸟声分类 | BirdNET TFJS + 中国先验 | 已接入 3 秒窗口、48 kHz；按中国 373 种及可选 GPS/月份过滤 | 官方网页代码 MIT，模型 CC BY-SA 4.0；发布前复核署名与衍生条款 |
 
 BirdNET 官方浏览器参考实现：
 <https://github.com/birdnet-team/real-time-pwa>
+
+中国视觉分类器及数据集：
+<https://github.com/Firefly-ZJ/Bird-Classification>
 
 ## 验收指标
 

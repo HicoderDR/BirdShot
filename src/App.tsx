@@ -19,6 +19,7 @@ type BirdPrediction = {
   commonName: string
   commonNameI18n: string
   confidence: number
+  geoscore?: number
 }
 
 type BirdNetMessage = {
@@ -38,6 +39,8 @@ const SNAPSHOT_COOLDOWN_MS = 5000
 const AUDIO_SAMPLE_RATE = 48000
 const AUDIO_WINDOW_SAMPLES = AUDIO_SAMPLE_RATE * 3
 const AUDIO_THRESHOLD = 0.15
+const AUDIO_CONFIDENT_THRESHOLD = 0.5
+const VISUAL_CONFIDENT_THRESHOLD = 0.65
 const SPECIES_CLASSIFICATION_INTERVAL_MS = 2500
 
 function App() {
@@ -66,6 +69,8 @@ function App() {
   const speciesClassificationInFlightRef = useRef(new Set<number>())
   const speciesClassificationTimesRef = useRef(new Map<number, number>())
   const speciesByTrackRef = useRef<Record<number, SpeciesPrediction[]>>({})
+  const chinaBirdNamesRef = useRef(new Map<string, string>())
+  const locationRef = useRef<{ latitude: number; longitude: number } | null>(null)
   const [status, setStatus] = useState<AppStatus>('idle')
   const [error, setError] = useState('')
   const [tracks, setTracks] = useState<BirdTrack[]>([])
@@ -74,6 +79,7 @@ function App() {
   const [audioLevel, setAudioLevel] = useState(0)
   const [audioModelStatus, setAudioModelStatus] = useState<AudioModelStatus>('idle')
   const [audioModelProgress, setAudioModelProgress] = useState(0)
+  const [audioRegionMode, setAudioRegionMode] = useState('中国常见种')
   const [soundPredictions, setSoundPredictions] = useState<BirdPrediction[]>([])
   const [toasts, setToasts] = useState<Toast[]>([])
   const [fps, setFps] = useState(0)
@@ -98,11 +104,14 @@ function App() {
     speciesClassificationInFlightRef.current.clear()
     speciesClassificationTimesRef.current.clear()
     speciesByTrackRef.current = {}
+    chinaBirdNamesRef.current.clear()
+    locationRef.current = null
     setTracks([])
     setSpeciesByTrack({})
     setAudioLevel(0)
     setAudioModelStatus('idle')
     setAudioModelProgress(0)
+    setAudioRegionMode('中国常见种')
     setSoundPredictions([])
     setToasts([])
     setStatus('idle')
@@ -159,7 +168,9 @@ function App() {
     nextTracks.forEach((track) => {
       const [x, y, boxWidth, boxHeight] = track.bbox
       const species = speciesByTrackRef.current[track.id]?.[0]
-      const speciesLabel = species ? ` · ${species.label}` : ''
+      const speciesLabel = species
+        ? ` · ${species.score >= VISUAL_CONFIDENT_THRESHOLD ? '' : '可能是 '}${species.label}`
+        : ''
       const label = `鸟 #${track.id}${speciesLabel}`.slice(0, 34)
       const labelWidth = context.measureText(label).width + 20
       context.strokeStyle = '#d8ff3e'
@@ -244,6 +255,11 @@ function App() {
   }, [])
 
   const startAudioPipeline = useCallback(async (stream: MediaStream) => {
+    const labelsResponse = await fetch('/models/china-birds-labels.json')
+    if (!labelsResponse.ok) throw new Error(`中国鸟种名单加载失败：HTTP ${labelsResponse.status}`)
+    const chinaLabels = await labelsResponse.json() as Array<{ scientificName: string; commonName: string }>
+    chinaBirdNamesRef.current = new Map(chinaLabels.map((label) => [label.scientificName, label.commonName]))
+
     const audioContext = new AudioContext({ sampleRate: AUDIO_SAMPLE_RATE })
     await audioContext.resume()
     if (audioContext.sampleRate !== AUDIO_SAMPLE_RATE) {
@@ -299,6 +315,21 @@ function App() {
     const worker = new Worker(`/birdnet-worker.js?${workerParams}`)
     birdNetWorkerRef.current = worker
 
+    navigator.geolocation?.getCurrentPosition(
+      ({ coords }) => {
+        locationRef.current = { latitude: coords.latitude, longitude: coords.longitude }
+        setAudioRegionMode('中国地域与月份先验')
+        if (birdNetReadyRef.current) {
+          worker.postMessage({ message: 'area-scores', ...locationRef.current })
+        }
+      },
+      () => {
+        locationRef.current = null
+        setAudioRegionMode('中国常见种')
+      },
+      { enableHighAccuracy: false, maximumAge: 24 * 60 * 60 * 1000, timeout: 8000 },
+    )
+
     const scheduleInference = () => {
       if (!runningRef.current) return
       if (
@@ -330,10 +361,19 @@ function App() {
         birdNetReadyRef.current = true
         setAudioModelStatus('ready')
         setAudioModelProgress(100)
+        if (locationRef.current) {
+          worker.postMessage({ message: 'area-scores', ...locationRef.current })
+        }
       }
       if (data.message === 'pooled' && data.pooled) {
         audioInferenceInFlightRef.current = false
         const predictions = data.pooled
+          .filter((prediction) => chinaBirdNamesRef.current.has(prediction.scientificName))
+          .filter((prediction) => !locationRef.current || (prediction.geoscore ?? 0) >= 0.05)
+          .map((prediction) => ({
+            ...prediction,
+            commonNameI18n: chinaBirdNamesRef.current.get(prediction.scientificName) ?? prediction.commonNameI18n,
+          }))
           .toSorted((a, b) => b.confidence - a.confidence)
           .slice(0, 3)
         setSoundPredictions(predictions)
@@ -427,7 +467,10 @@ function App() {
             <span className="toast-icon">♪</span>
             <div>
               <small>检测到鸟鸣</small>
-              <strong>{toast.commonNameI18n || toast.commonName}</strong>
+              <strong>
+                {toast.confidence >= AUDIO_CONFIDENT_THRESHOLD ? '' : '可能是 '}
+                {toast.commonNameI18n || toast.commonName}
+              </strong>
               <em>{toast.scientificName}</em>
             </div>
             <b>{Math.round(toast.confidence * 100)}%</b>
@@ -482,7 +525,7 @@ function App() {
                   <div>
                     <strong>
                       {speciesByTrack[track.id]?.[0]
-                        ? `可能是 ${speciesByTrack[track.id][0].label}`
+                        ? `${speciesByTrack[track.id][0].score >= VISUAL_CONFIDENT_THRESHOLD ? '' : '可能是 '}${speciesByTrack[track.id][0].label}`
                         : track.hits >= 3 ? '正在分类鸟种…' : '鸟类目标'}
                     </strong>
                     <small>
@@ -508,7 +551,7 @@ function App() {
             <div><span className="section-number">02</span><h2>环境声音</h2></div>
             <span>
               {audioModelStatus === 'loading' && `模型 ${audioModelProgress}%`}
-              {audioModelStatus === 'ready' && 'BirdNET 就绪'}
+              {audioModelStatus === 'ready' && `BirdNET 就绪 · ${audioRegionMode}`}
               {audioModelStatus === 'error' && '模型错误'}
               {audioModelStatus === 'idle' && '待命'}
             </span>
@@ -523,7 +566,12 @@ function App() {
               {soundPredictions.map((prediction) => (
                 <div className="sound-result" key={prediction.index}>
                   <div>
-                    <strong>{prediction.confidence >= AUDIO_THRESHOLD ? '' : '低置信度 · '}{prediction.commonNameI18n || prediction.commonName}</strong>
+                    <strong>
+                      {prediction.confidence >= AUDIO_CONFIDENT_THRESHOLD
+                        ? ''
+                        : prediction.confidence >= AUDIO_THRESHOLD ? '可能是 ' : '低置信度 · '}
+                      {prediction.commonNameI18n || prediction.commonName}
+                    </strong>
                     <small>{prediction.scientificName}</small>
                   </div>
                   <b>{Math.round(prediction.confidence * 100)}%</b>
@@ -567,8 +615,8 @@ function App() {
         <div className="model-grid">
           <article><span className="ready">已接入</span><h3>YOLO11n ONNX</h3><p>640 px 输入 · WASM 本地推理 · bird 专用解码</p><b>视觉检测</b></article>
           <article><span className="ready">已接入</span><h3>ByteTrack</h3><p>高低置信度两阶段关联、运动预测与稳定 ID</p><b>多目标追踪</b></article>
-          <article><span className="ready">已接入</span><h3>EfficientNet Birds-525</h3><p>对每个稳定追踪框裁剪并输出前三个鸟种候选</p><b>视觉鸟种分类</b></article>
-          <article><span className="ready">已接入</span><h3>BirdNET TFJS</h3><p>3 秒音频窗 · 本地物种分类 · 中文标签</p><b>声音识别</b></article>
+          <article><span className="ready">已接入</span><h3>China Birds ConvNeXt</h3><p>中国常见 373 种 · 对稳定追踪框输出前三候选</p><b>视觉鸟种分类</b></article>
+          <article><span className="ready">已接入</span><h3>BirdNET + 中国先验</h3><p>中国常见种过滤 · 可选 GPS 与月份出现概率</p><b>声音识别</b></article>
         </div>
       </section>
 

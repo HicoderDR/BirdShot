@@ -3,17 +3,21 @@ import type { BoundingBox } from './tracker'
 
 export type SpeciesPrediction = {
   label: string
+  scientificName: string
   score: number
 }
 
-type ModelConfig = {
-  id2label: Record<string, string>
+type ChinaBirdLabel = {
+  scientificName: string
+  commonName: string
+  taxonId: number
 }
 
 const INPUT_SIZE = 224
-const MODEL_BASE_URL = 'https://huggingface.co/ozzyonfire/bird-species-classifier/resolve/main'
+const MODEL_URL = '/models/china-birds-v1base.onnx'
+const LABELS_URL = '/models/china-birds-labels.json'
 const IMAGE_MEAN = [0.485, 0.456, 0.406]
-const IMAGE_STD = [0.47853944, 0.4732864, 0.47434163]
+const IMAGE_STD = [0.229, 0.224, 0.225]
 
 function softmax(values: Float32Array) {
   const maximum = values.reduce((current, value) => Math.max(current, value), Number.NEGATIVE_INFINITY)
@@ -24,7 +28,7 @@ function softmax(values: Float32Array) {
 
 export class BirdSpeciesClassifier {
   private session: InferenceSession | null = null
-  private labels: string[] = []
+  private labels: ChinaBirdLabel[] = []
   private readonly canvas = document.createElement('canvas')
   private readonly context: CanvasRenderingContext2D
 
@@ -38,16 +42,13 @@ export class BirdSpeciesClassifier {
 
   async load() {
     if (this.session) return
-    const [ort, configResponse] = await Promise.all([
+    const [ort, labelsResponse] = await Promise.all([
       import('onnxruntime-web/wasm'),
-      fetch(`${MODEL_BASE_URL}/config.json`),
+      fetch(LABELS_URL),
     ])
-    if (!configResponse.ok) throw new Error(`鸟种标签加载失败：HTTP ${configResponse.status}`)
-    const config = await configResponse.json() as ModelConfig
-    this.labels = Object.entries(config.id2label)
-      .toSorted(([left], [right]) => Number(left) - Number(right))
-      .map(([, label]) => label)
-    this.session = await ort.InferenceSession.create(`${MODEL_BASE_URL}/onnx/model.onnx`, {
+    if (!labelsResponse.ok) throw new Error(`中国鸟种标签加载失败：HTTP ${labelsResponse.status}`)
+    this.labels = await labelsResponse.json() as ChinaBirdLabel[]
+    this.session = await ort.InferenceSession.create(MODEL_URL, {
       executionProviders: ['wasm'],
       graphOptimizationLevel: 'all',
     })
@@ -94,7 +95,11 @@ export class BirdSpeciesClassifier {
     const outputs = await this.session.run({ [this.session.inputNames[0]]: tensor })
     const logits = outputs[this.session.outputNames[0]].data as Float32Array
     return softmax(logits)
-      .map((score, index) => ({ label: this.labels[index] ?? `Species ${index}`, score }))
+      .map((score, index) => ({
+        label: this.labels[index]?.commonName ?? `鸟种 ${index}`,
+        scientificName: this.labels[index]?.scientificName ?? '',
+        score,
+      }))
       .toSorted((a, b) => b.score - a.score)
       .slice(0, 3)
   }
