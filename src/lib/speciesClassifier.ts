@@ -10,7 +10,7 @@ type ModelConfig = {
   id2label: Record<string, string>
 }
 
-const INPUT_SIZE = 260
+const INPUT_SIZE = 224
 const MODEL_BASE_URL = 'https://huggingface.co/ozzyonfire/bird-species-classifier/resolve/main'
 const IMAGE_MEAN = [0.485, 0.456, 0.406]
 const IMAGE_STD = [0.47853944, 0.4732864, 0.47434163]
