@@ -9,10 +9,20 @@ export type BirdTrack = BirdDetection & {
   id: number
   hits: number
   missed: number
+  velocity: BoundingBox
 }
 
-const MIN_IOU = 0.25
-const MAX_MISSED_FRAMES = 5
+type MatchResult = {
+  tracks: BirdTrack[]
+  unmatchedTracks: BirdTrack[]
+  unmatchedDetections: BirdDetection[]
+}
+
+const HIGH_CONFIDENCE = 0.5
+const LOW_CONFIDENCE = 0.1
+const FIRST_MATCH_IOU = 0.25
+const SECOND_MATCH_IOU = 0.18
+const MAX_MISSED_FRAMES = 8
 
 function intersectionOverUnion(a: BoundingBox, b: BoundingBox) {
   const left = Math.max(a[0], b[0])
@@ -24,46 +34,81 @@ function intersectionOverUnion(a: BoundingBox, b: BoundingBox) {
   return union > 0 ? intersection / union : 0
 }
 
+function predict(track: BirdTrack): BoundingBox {
+  return track.bbox.map((value, index) => value + track.velocity[index]) as BoundingBox
+}
+
+function associate(tracks: BirdTrack[], detections: BirdDetection[], minimumIou: number): MatchResult {
+  const candidates: Array<{ trackIndex: number; detectionIndex: number; iou: number }> = []
+  tracks.forEach((track, trackIndex) => {
+    detections.forEach((detection, detectionIndex) => {
+      const iou = intersectionOverUnion(predict(track), detection.bbox)
+      if (iou >= minimumIou) candidates.push({ trackIndex, detectionIndex, iou })
+    })
+  })
+  candidates.sort((a, b) => b.iou - a.iou)
+
+  const usedTracks = new Set<number>()
+  const usedDetections = new Set<number>()
+  const matched: BirdTrack[] = []
+
+  candidates.forEach(({ trackIndex, detectionIndex }) => {
+    if (usedTracks.has(trackIndex) || usedDetections.has(detectionIndex)) return
+    usedTracks.add(trackIndex)
+    usedDetections.add(detectionIndex)
+    const track = tracks[trackIndex]
+    const detection = detections[detectionIndex]
+    const velocity = detection.bbox.map((value, index) => (
+      (value - track.bbox[index]) * 0.65 + track.velocity[index] * 0.35
+    )) as BoundingBox
+
+    matched.push({
+      ...track,
+      bbox: detection.bbox,
+      score: detection.score,
+      velocity,
+      hits: track.hits + 1,
+      missed: 0,
+    })
+  })
+
+  return {
+    tracks: matched,
+    unmatchedTracks: tracks.filter((_, index) => !usedTracks.has(index)),
+    unmatchedDetections: detections.filter((_, index) => !usedDetections.has(index)),
+  }
+}
+
 export function updateTracks(
   currentTracks: BirdTrack[],
   detections: BirdDetection[],
   nextId: number,
 ): { tracks: BirdTrack[]; nextId: number } {
-  const unmatchedDetections = new Set(detections.map((_, index) => index))
-  const matchedTracks = currentTracks.map((track) => {
-    let bestIndex = -1
-    let bestIou = MIN_IOU
+  const highConfidence = detections.filter((detection) => detection.score >= HIGH_CONFIDENCE)
+  const lowConfidence = detections.filter((detection) => (
+    detection.score >= LOW_CONFIDENCE && detection.score < HIGH_CONFIDENCE
+  ))
 
-    unmatchedDetections.forEach((index) => {
-      const iou = intersectionOverUnion(track.bbox, detections[index].bbox)
-      if (iou > bestIou) {
-        bestIou = iou
-        bestIndex = index
-      }
-    })
-
-    if (bestIndex < 0) return { ...track, missed: track.missed + 1 }
-
-    unmatchedDetections.delete(bestIndex)
-    const detection = detections[bestIndex]
-    return {
+  const firstPass = associate(currentTracks, highConfidence, FIRST_MATCH_IOU)
+  const secondPass = associate(firstPass.unmatchedTracks, lowConfidence, SECOND_MATCH_IOU)
+  const unmatchedTracks = secondPass.unmatchedTracks
+    .map((track) => ({
       ...track,
-      bbox: detection.bbox,
-      score: detection.score,
-      hits: track.hits + 1,
-      missed: 0,
-    }
-  })
+      bbox: predict(track),
+      missed: track.missed + 1,
+    }))
+    .filter((track) => track.missed <= MAX_MISSED_FRAMES)
 
-  const newTracks = Array.from(unmatchedDetections, (index) => ({
-    ...detections[index],
+  const newTracks = firstPass.unmatchedDetections.map((detection) => ({
+    ...detection,
     id: nextId++,
     hits: 1,
     missed: 0,
+    velocity: [0, 0, 0, 0] as BoundingBox,
   }))
 
   return {
-    tracks: [...matchedTracks.filter((track) => track.missed <= MAX_MISSED_FRAMES), ...newTracks],
+    tracks: [...firstPass.tracks, ...secondPass.tracks, ...unmatchedTracks, ...newTracks],
     nextId,
   }
 }

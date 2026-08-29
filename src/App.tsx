@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import type { ObjectDetection } from '@tensorflow-models/coco-ssd'
 import { updateTracks, type BirdTrack } from './lib/tracker'
+import { YoloBirdDetector } from './lib/yoloDetector'
+import { BirdSpeciesClassifier, type SpeciesPrediction } from './lib/speciesClassifier'
 import './App.css'
 
 type AppStatus = 'idle' | 'requesting' | 'loading-model' | 'running' | 'error'
@@ -12,15 +13,40 @@ type Snapshot = {
   trackId: number
 }
 
-const DETECTION_INTERVAL_MS = 180
+type BirdPrediction = {
+  index: number
+  scientificName: string
+  commonName: string
+  commonNameI18n: string
+  confidence: number
+}
+
+type BirdNetMessage = {
+  message: string
+  progress?: number
+  pooled?: BirdPrediction[]
+}
+
+type Toast = BirdPrediction & {
+  id: number
+}
+
+type AudioModelStatus = 'idle' | 'loading' | 'ready' | 'error'
+
+const DETECTION_INTERVAL_MS = 80
 const SNAPSHOT_COOLDOWN_MS = 5000
+const AUDIO_SAMPLE_RATE = 48000
+const AUDIO_WINDOW_SAMPLES = AUDIO_SAMPLE_RATE * 3
+const AUDIO_THRESHOLD = 0.15
+const SPECIES_CLASSIFICATION_INTERVAL_MS = 2500
 
 function App() {
   const videoRef = useRef<HTMLVideoElement>(null)
   const overlayRef = useRef<HTMLCanvasElement>(null)
   const captureRef = useRef<HTMLCanvasElement>(null)
   const streamRef = useRef<MediaStream | null>(null)
-  const detectorRef = useRef<ObjectDetection | null>(null)
+  const detectorRef = useRef<YoloBirdDetector | null>(null)
+  const speciesClassifierRef = useRef<BirdSpeciesClassifier | null>(null)
   const tracksRef = useRef<BirdTrack[]>([])
   const animationRef = useRef<number | null>(null)
   const runningRef = useRef(false)
@@ -28,24 +54,57 @@ function App() {
   const lastSnapshotRef = useRef(0)
   const capturedTracksRef = useRef(new Set<number>())
   const audioContextRef = useRef<AudioContext | null>(null)
+  const audioWorkletRef = useRef<AudioWorkletNode | null>(null)
+  const birdNetWorkerRef = useRef<Worker | null>(null)
+  const birdNetReadyRef = useRef(false)
+  const audioBufferRef = useRef(new Float32Array(AUDIO_WINDOW_SAMPLES))
+  const audioWriteIndexRef = useRef(0)
+  const audioSamplesRef = useRef(0)
+  const audioInferenceRef = useRef<number | null>(null)
+  const audioInferenceInFlightRef = useRef(false)
+  const notificationTimesRef = useRef(new Map<number, number>())
+  const speciesClassificationInFlightRef = useRef(new Set<number>())
+  const speciesClassificationTimesRef = useRef(new Map<number, number>())
+  const speciesByTrackRef = useRef<Record<number, SpeciesPrediction[]>>({})
   const [status, setStatus] = useState<AppStatus>('idle')
   const [error, setError] = useState('')
   const [tracks, setTracks] = useState<BirdTrack[]>([])
+  const [speciesByTrack, setSpeciesByTrack] = useState<Record<number, SpeciesPrediction[]>>({})
   const [snapshots, setSnapshots] = useState<Snapshot[]>([])
   const [audioLevel, setAudioLevel] = useState(0)
+  const [audioModelStatus, setAudioModelStatus] = useState<AudioModelStatus>('idle')
+  const [audioModelProgress, setAudioModelProgress] = useState(0)
+  const [soundPredictions, setSoundPredictions] = useState<BirdPrediction[]>([])
+  const [toasts, setToasts] = useState<Toast[]>([])
   const [fps, setFps] = useState(0)
 
   const stop = useCallback(() => {
     runningRef.current = false
     if (animationRef.current !== null) window.clearTimeout(animationRef.current)
+    if (audioInferenceRef.current !== null) window.clearTimeout(audioInferenceRef.current)
     streamRef.current?.getTracks().forEach((track) => track.stop())
     streamRef.current = null
     void audioContextRef.current?.close()
     audioContextRef.current = null
+    audioWorkletRef.current = null
+    birdNetWorkerRef.current?.terminate()
+    birdNetWorkerRef.current = null
+    birdNetReadyRef.current = false
+    audioWriteIndexRef.current = 0
+    audioSamplesRef.current = 0
+    audioInferenceInFlightRef.current = false
     tracksRef.current = []
     capturedTracksRef.current.clear()
+    speciesClassificationInFlightRef.current.clear()
+    speciesClassificationTimesRef.current.clear()
+    speciesByTrackRef.current = {}
     setTracks([])
+    setSpeciesByTrack({})
     setAudioLevel(0)
+    setAudioModelStatus('idle')
+    setAudioModelProgress(0)
+    setSoundPredictions([])
+    setToasts([])
     setStatus('idle')
   }, [])
 
@@ -99,7 +158,9 @@ function App() {
 
     nextTracks.forEach((track) => {
       const [x, y, boxWidth, boxHeight] = track.bbox
-      const label = `鸟 #${track.id}  ${Math.round(track.score * 100)}%`
+      const species = speciesByTrackRef.current[track.id]?.[0]
+      const speciesLabel = species ? ` · ${species.label}` : ''
+      const label = `鸟 #${track.id}${speciesLabel}`.slice(0, 34)
       const labelWidth = context.measureText(label).width + 20
       context.strokeStyle = '#d8ff3e'
       context.lineWidth = Math.max(3, width / 240)
@@ -111,15 +172,36 @@ function App() {
     })
   }, [])
 
+  const classifyTrack = useCallback((track: BirdTrack) => {
+    const classifier = speciesClassifierRef.current
+    const video = videoRef.current
+    if (!classifier || !video || speciesClassificationInFlightRef.current.has(track.id)) return
+
+    speciesClassificationInFlightRef.current.add(track.id)
+    speciesClassificationTimesRef.current.set(track.id, Date.now())
+    void classifier.classify(video, track.bbox)
+      .then((predictions) => {
+        if (!runningRef.current) return
+        setSpeciesByTrack((current) => {
+          const next = { ...current, [track.id]: predictions }
+          speciesByTrackRef.current = next
+          return next
+        })
+      })
+      .catch((cause) => {
+        setError(cause instanceof Error ? `鸟种分类失败：${cause.message}` : '鸟种分类失败')
+      })
+      .finally(() => {
+        speciesClassificationInFlightRef.current.delete(track.id)
+      })
+  }, [])
+
   const detect = useCallback(async function runDetection() {
     if (!runningRef.current || !videoRef.current || !detectorRef.current) return
 
     const startedAt = performance.now()
     try {
-      const predictions = await detectorRef.current.detect(videoRef.current, 20, 0.35)
-      const birdDetections = predictions
-        .filter((prediction) => prediction.class === 'bird')
-        .map(({ bbox, score }) => ({ bbox, score }))
+      const birdDetections = await detectorRef.current.detect(videoRef.current)
 
       const result = updateTracks(tracksRef.current, birdDetections, nextTrackIdRef.current)
       nextTrackIdRef.current = result.nextId
@@ -129,6 +211,13 @@ function App() {
 
       const stableTrack = result.tracks.find((track) => track.hits >= 3 && !capturedTracksRef.current.has(track.id))
       if (stableTrack && captureTrack(stableTrack)) capturedTracksRef.current.add(stableTrack.id)
+      const trackForClassification = result.tracks.find((track) => (
+        track.hits >= 3
+        && track.missed === 0
+        && Date.now() - (speciesClassificationTimesRef.current.get(track.id) ?? 0) >= SPECIES_CLASSIFICATION_INTERVAL_MS
+        && !speciesClassificationInFlightRef.current.has(track.id)
+      ))
+      if (trackForClassification) classifyTrack(trackForClassification)
       setFps(Math.round(1000 / Math.max(1, performance.now() - startedAt)))
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : '视觉推理失败')
@@ -138,13 +227,37 @@ function App() {
     }
 
     animationRef.current = window.setTimeout(() => void runDetection(), DETECTION_INTERVAL_MS)
-  }, [captureTrack, drawTracks])
+  }, [captureTrack, classifyTrack, drawTracks])
 
-  const startAudioMeter = useCallback((stream: MediaStream) => {
-    const audioContext = new AudioContext()
+  const showPredictionToasts = useCallback((predictions: BirdPrediction[]) => {
+    const now = Date.now()
+    predictions.forEach((prediction) => {
+      const lastNotification = notificationTimesRef.current.get(prediction.index) ?? 0
+      if (now - lastNotification < 8000) return
+      notificationTimesRef.current.set(prediction.index, now)
+      const toast = { ...prediction, id: now + prediction.index }
+      setToasts((current) => [toast, ...current].slice(0, 3))
+      window.setTimeout(() => {
+        setToasts((current) => current.filter((item) => item.id !== toast.id))
+      }, 6000)
+    })
+  }, [])
+
+  const startAudioPipeline = useCallback(async (stream: MediaStream) => {
+    const audioContext = new AudioContext({ sampleRate: AUDIO_SAMPLE_RATE })
+    await audioContext.resume()
+    if (audioContext.sampleRate !== AUDIO_SAMPLE_RATE) {
+      throw new Error(`浏览器音频采样率为 ${audioContext.sampleRate} Hz，BirdNET 需要 48000 Hz`)
+    }
     const analyser = audioContext.createAnalyser()
     analyser.fftSize = 256
-    audioContext.createMediaStreamSource(stream).connect(analyser)
+    const source = audioContext.createMediaStreamSource(stream)
+    const highPass = audioContext.createBiquadFilter()
+    highPass.type = 'highpass'
+    highPass.frequency.value = 200
+    highPass.Q.value = 0.707
+    source.connect(highPass)
+    highPass.connect(analyser)
     audioContextRef.current = audioContext
     const levels = new Uint8Array(analyser.frequencyBinCount)
 
@@ -156,7 +269,83 @@ function App() {
       window.requestAnimationFrame(sample)
     }
     sample()
-  }, [])
+
+    if (!audioContext.audioWorklet) throw new Error('当前浏览器不支持 AudioWorklet')
+    await audioContext.audioWorklet.addModule('/audio-processor.js')
+    const worklet = new AudioWorkletNode(audioContext, 'birdshot-audio-processor')
+    const silentOutput = audioContext.createGain()
+    silentOutput.gain.value = 0
+    highPass.connect(worklet)
+    worklet.connect(silentOutput)
+    silentOutput.connect(audioContext.destination)
+    audioWorkletRef.current = worklet
+    audioBufferRef.current = new Float32Array(AUDIO_WINDOW_SAMPLES)
+
+    worklet.port.onmessage = ({ data }: MessageEvent<Float32Array>) => {
+      const buffer = audioBufferRef.current
+      data.forEach((sampleValue) => {
+        buffer[audioWriteIndexRef.current] = sampleValue
+        audioWriteIndexRef.current = (audioWriteIndexRef.current + 1) % buffer.length
+      })
+      audioSamplesRef.current = Math.min(buffer.length, audioSamplesRef.current + data.length)
+    }
+
+    setAudioModelStatus('loading')
+    const workerParams = new URLSearchParams({
+      tf: 'https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js',
+      root: 'https://birdnet-team.github.io/real-time-pwa/models',
+      lang: 'zh',
+    })
+    const worker = new Worker(`/birdnet-worker.js?${workerParams}`)
+    birdNetWorkerRef.current = worker
+
+    const scheduleInference = () => {
+      if (!runningRef.current) return
+      if (
+        birdNetReadyRef.current
+        && !audioInferenceInFlightRef.current
+        && audioSamplesRef.current >= AUDIO_WINDOW_SAMPLES
+      ) {
+        const circular = audioBufferRef.current
+        const windowed = new Float32Array(circular.length)
+        const writeIndex = audioWriteIndexRef.current
+        windowed.set(circular.subarray(writeIndex))
+        windowed.set(circular.subarray(0, writeIndex), circular.length - writeIndex)
+        audioInferenceInFlightRef.current = true
+        worker.postMessage({
+          message: 'predict',
+          pcmAudio: windowed,
+          overlapSec: 1.5,
+          sensitivity: 1,
+        }, [windowed.buffer])
+      }
+      audioInferenceRef.current = window.setTimeout(scheduleInference, 500)
+    }
+
+    worker.onmessage = ({ data }: MessageEvent<BirdNetMessage>) => {
+      if (['load_model', 'warmup', 'load_geomodel', 'load_labels'].includes(data.message)) {
+        setAudioModelProgress(data.progress ?? 0)
+      }
+      if (data.message === 'loaded') {
+        birdNetReadyRef.current = true
+        setAudioModelStatus('ready')
+        setAudioModelProgress(100)
+      }
+      if (data.message === 'pooled' && data.pooled) {
+        audioInferenceInFlightRef.current = false
+        const predictions = data.pooled
+          .toSorted((a, b) => b.confidence - a.confidence)
+          .slice(0, 3)
+        setSoundPredictions(predictions)
+        showPredictionToasts(predictions.filter((prediction) => prediction.confidence >= AUDIO_THRESHOLD))
+      }
+    }
+    worker.onerror = (event) => {
+      setAudioModelStatus('error')
+      setError(`BirdNET 加载失败：${event.message || '请检查网络后重试'}`)
+    }
+    scheduleInference()
+  }, [showPredictionToasts])
 
   const start = useCallback(async () => {
     if (!navigator.mediaDevices?.getUserMedia) {
@@ -175,6 +364,8 @@ function App() {
           height: { ideal: 720 },
         },
         audio: {
+          channelCount: { ideal: 1 },
+          sampleRate: { ideal: AUDIO_SAMPLE_RATE },
           echoCancellation: false,
           noiseSuppression: false,
           autoGainControl: false,
@@ -185,23 +376,29 @@ function App() {
       videoRef.current.srcObject = stream
       await videoRef.current.play()
       runningRef.current = true
-      startAudioMeter(stream)
+      await startAudioPipeline(stream)
 
       setStatus('loading-model')
-      if (!detectorRef.current) {
-        await import('@tensorflow/tfjs-backend-webgl')
-        const cocoSsd = await import('@tensorflow-models/coco-ssd')
-        detectorRef.current = await cocoSsd.load({ base: 'lite_mobilenet_v2' })
-      }
+      detectorRef.current ??= new YoloBirdDetector()
+      speciesClassifierRef.current ??= new BirdSpeciesClassifier()
+      await Promise.all([
+        detectorRef.current.load(),
+        speciesClassifierRef.current.load(),
+      ])
       setStatus('running')
       void detect()
     } catch (cause) {
       streamRef.current?.getTracks().forEach((track) => track.stop())
+      birdNetWorkerRef.current?.terminate()
+      birdNetWorkerRef.current = null
+      birdNetReadyRef.current = false
+      void audioContextRef.current?.close()
+      audioContextRef.current = null
       runningRef.current = false
       setError(cause instanceof Error ? cause.message : '无法启动设备')
       setStatus('error')
     }
-  }, [detect, startAudioMeter])
+  }, [detect, startAudioPipeline])
 
   const statusText = {
     idle: '设备待命',
@@ -223,6 +420,20 @@ function App() {
           {statusText}
         </span>
       </header>
+
+      <aside className="toast-stack" aria-live="polite">
+        {toasts.map((toast) => (
+          <div className="bird-toast" key={toast.id}>
+            <span className="toast-icon">♪</span>
+            <div>
+              <small>检测到鸟鸣</small>
+              <strong>{toast.commonNameI18n || toast.commonName}</strong>
+              <em>{toast.scientificName}</em>
+            </div>
+            <b>{Math.round(toast.confidence * 100)}%</b>
+          </div>
+        ))}
+      </aside>
 
       <section className="hero">
         <div className="eyebrow">ON-DEVICE BIRD INTELLIGENCE</div>
@@ -268,8 +479,22 @@ function App() {
               {tracks.map((track) => (
                 <div className="target" key={track.id}>
                   <span className="target-id">#{track.id}</span>
-                  <div><strong>鸟类目标</strong><small>{track.hits >= 3 ? '追踪稳定' : '正在确认'}</small></div>
-                  <b>{Math.round(track.score * 100)}%</b>
+                  <div>
+                    <strong>
+                      {speciesByTrack[track.id]?.[0]
+                        ? `可能是 ${speciesByTrack[track.id][0].label}`
+                        : track.hits >= 3 ? '正在分类鸟种…' : '鸟类目标'}
+                    </strong>
+                    <small>
+                      {speciesByTrack[track.id]?.slice(1).map((prediction) => prediction.label).join(' · ')
+                        || (track.hits >= 3 ? '追踪稳定' : '正在确认')}
+                    </small>
+                  </div>
+                  <b>
+                    {speciesByTrack[track.id]?.[0]
+                      ? `${Math.round(speciesByTrack[track.id][0].score * 100)}%`
+                      : `${Math.round(track.score * 100)}%`}
+                  </b>
                 </div>
               ))}
             </div>
@@ -281,14 +506,37 @@ function App() {
         <article className="panel sound-panel">
           <div className="panel-title">
             <div><span className="section-number">02</span><h2>环境声音</h2></div>
-            <span>{status === 'running' ? '监听中' : '待命'}</span>
+            <span>
+              {audioModelStatus === 'loading' && `模型 ${audioModelProgress}%`}
+              {audioModelStatus === 'ready' && 'BirdNET 就绪'}
+              {audioModelStatus === 'error' && '模型错误'}
+              {audioModelStatus === 'idle' && '待命'}
+            </span>
           </div>
           <div className="sound-visual">
             {Array.from({ length: 24 }, (_, index) => (
               <i key={index} style={{ height: `${Math.max(8, status === 'running' ? audioLevel * (0.3 + ((index * 7) % 10) / 12) : 8)}%` }} />
             ))}
           </div>
-          <p className="model-note"><strong>BirdNET TFJS</strong> 音频分类适配中；当前只显示真实输入电平，不生成虚假物种判断。</p>
+          {soundPredictions.length > 0 ? (
+            <div className="sound-results">
+              {soundPredictions.map((prediction) => (
+                <div className="sound-result" key={prediction.index}>
+                  <div>
+                    <strong>{prediction.confidence >= AUDIO_THRESHOLD ? '' : '低置信度 · '}{prediction.commonNameI18n || prediction.commonName}</strong>
+                    <small>{prediction.scientificName}</small>
+                  </div>
+                  <b>{Math.round(prediction.confidence * 100)}%</b>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <p className="model-note">
+              {audioModelStatus === 'ready'
+                ? '正在分析连续 3 秒音频窗；达到 15% 阈值的候选会显示并弹出提示。'
+                : 'BirdNET 首次需要下载约 50 MB 权重，之后可从浏览器缓存加载。'}
+            </p>
+          )}
         </article>
       </section>
 
@@ -317,9 +565,10 @@ function App() {
           <p>先验证延迟、准确率与耗电，再决定生产模型。</p>
         </div>
         <div className="model-grid">
-          <article><span className="ready">已接入</span><h3>COCO-SSD Lite</h3><p>浏览器基线 · 只判断 bird，不区分物种</p><b>视觉检测</b></article>
-          <article><span className="next">下一步</span><h3>YOLO Nano + ByteTrack</h3><p>更强的小目标、多鸟遮挡与稳定 ID</p><b>检测与追踪</b></article>
-          <article><span className="next">下一步</span><h3>BirdNET TFJS</h3><p>3 秒音频窗 · 本地物种分类 · 中文标签</p><b>声音识别</b></article>
+          <article><span className="ready">已接入</span><h3>YOLO11n ONNX</h3><p>640 px 输入 · WASM 本地推理 · bird 专用解码</p><b>视觉检测</b></article>
+          <article><span className="ready">已接入</span><h3>ByteTrack</h3><p>高低置信度两阶段关联、运动预测与稳定 ID</p><b>多目标追踪</b></article>
+          <article><span className="ready">已接入</span><h3>EfficientNet Birds-525</h3><p>对每个稳定追踪框裁剪并输出前三个鸟种候选</p><b>视觉鸟种分类</b></article>
+          <article><span className="ready">已接入</span><h3>BirdNET TFJS</h3><p>3 秒音频窗 · 本地物种分类 · 中文标签</p><b>声音识别</b></article>
         </div>
       </section>
 

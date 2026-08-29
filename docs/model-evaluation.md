@@ -10,11 +10,10 @@
 
 | 能力 | 第一轮模型 | 用途 | 限制与许可证 |
 | --- | --- | --- | --- |
-| 鸟目标检测 | COCO-SSD Lite MobileNet v2 | 验证相机、框选、自动拍照和端侧性能 | Apache-2.0；只能输出 `bird`，小目标能力有限 |
-| 鸟目标检测 | YOLO nano 自训练模型（ONNX） | 替换 COCO-SSD，提高小鸟、密集目标与遮挡场景召回 | 需单独确认所选实现和权重的商业许可证 |
-| 多目标追踪 | 当前 IoU tracker / ByteTrack | 当前实现验证 UX，ByteTrack 用于生产稳定 ID | ByteTrack 为 MIT；追踪本身不判断物种 |
-| 视觉物种分类 | MobileNetV3 / EfficientNet-Lite（自训练） | 裁剪检测框后做二阶段物种分类 | 应用地区物种子集比全球分类更适合手机端 |
-| 鸟声分类 | BirdNET TFJS | 3 秒窗口、约 48 kHz、本地实时分类和中文标签 | 官方网页代码 MIT，模型 CC BY-SA 4.0；发布前复核署名与衍生条款 |
+| 鸟目标检测 | YOLO11n（ONNX） | 当前 640 px 视觉基线，提高小鸟、密集目标召回 | Ultralytics 权重受 AGPL-3.0/企业许可约束，商业发布前必须处理 |
+| 多目标追踪 | ByteTrack 风格 tracker | 高低置信度两阶段关联，并用速度预测跨越短暂漏检 | 当前实现无 Kalman filter；生产版仍需针对遮挡数据评测 |
+| 视觉物种分类 | EfficientNet Birds-525（ONNX） | 已接入；裁剪稳定追踪框后输出三个候选 | MIT；训练集物种和地域有限，实验准确率不能代表野外画面 |
+| 鸟声分类 | BirdNET TFJS | 已接入 3 秒窗口、48 kHz、本地实时分类和中文标签 | 官方网页代码 MIT，模型 CC BY-SA 4.0；发布前复核署名与衍生条款 |
 
 BirdNET 官方浏览器参考实现：
 <https://github.com/birdnet-team/real-time-pwa>

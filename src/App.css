@@ -73,6 +73,79 @@ main {
   background: #e05c44;
 }
 
+.toast-stack {
+  position: fixed;
+  z-index: 20;
+  display: grid;
+  width: min(360px, calc(100vw - 24px));
+  top: 72px;
+  right: 12px;
+  gap: 8px;
+  pointer-events: none;
+}
+
+.bird-toast {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 13px;
+  border: 1px solid rgba(216, 255, 62, 0.45);
+  border-radius: 14px;
+  color: white;
+  background: rgba(16, 33, 26, 0.96);
+  box-shadow: 0 16px 42px rgba(16, 33, 26, 0.3);
+  animation: toast-in 240ms ease-out;
+  backdrop-filter: blur(12px);
+}
+
+.toast-icon {
+  display: grid;
+  width: 38px;
+  height: 38px;
+  place-items: center;
+  border-radius: 50%;
+  color: var(--ink);
+  background: var(--lime);
+  font-size: 18px;
+  font-weight: 900;
+}
+
+.bird-toast small,
+.bird-toast strong,
+.bird-toast em {
+  display: block;
+}
+
+.bird-toast small {
+  color: #9eb0a7;
+  font-size: 9px;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+}
+
+.bird-toast strong {
+  margin-top: 2px;
+  font-family: Georgia, serif;
+  font-size: 17px;
+  font-weight: 400;
+}
+
+.bird-toast em {
+  margin-top: 2px;
+  color: #9eb0a7;
+  font-size: 9px;
+}
+
+.bird-toast b {
+  color: var(--lime);
+  font-size: 13px;
+}
+
+@keyframes toast-in {
+  from { opacity: 0; transform: translateY(-8px) scale(0.98); }
+}
+
 .hero {
   max-width: 880px;
   padding: clamp(54px, 8vw, 110px) clamp(20px, 5vw, 72px) 42px;
@@ -323,6 +396,7 @@ main {
 .target strong {
   color: var(--ink);
   font-size: 14px;
+  overflow-wrap: anywhere;
 }
 
 .target small {
@@ -370,6 +444,43 @@ main {
 
 .model-note strong {
   color: var(--ink);
+}
+
+.sound-results {
+  margin-top: 12px;
+}
+
+.sound-result {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid var(--line);
+}
+
+.sound-result strong,
+.sound-result small {
+  display: block;
+}
+
+.sound-result strong {
+  color: var(--ink);
+  font-family: Georgia, serif;
+  font-size: 16px;
+  font-weight: 400;
+}
+
+.sound-result small {
+  margin-top: 2px;
+  color: var(--muted);
+  font-size: 9px;
+  font-style: italic;
+}
+
+.sound-result b {
+  color: #52705f;
+  font-size: 13px;
 }
 
 .gallery,
@@ -432,7 +543,7 @@ main {
 }
 
 .model-grid {
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   padding: 0;
 }
 

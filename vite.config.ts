@@ -26,14 +26,15 @@ export default defineConfig({
         ],
       },
       workbox: {
-        globPatterns: ['**/*.{js,css,html,svg,png}'],
+        globPatterns: ['**/*.{js,css,html,svg,png,wasm}'],
+        maximumFileSizeToCacheInBytes: 30 * 1024 * 1024,
         runtimeCaching: [
           {
-            urlPattern: /^https:\/\/storage\.googleapis\.com\/tfjs-models\//,
+            urlPattern: /^https:\/\/(raw\.githubusercontent\.com\/nomi30701\/YOLO-ByteTrack-ONNX-Web|birdnet-team\.github\.io\/real-time-pwa|cdn\.jsdelivr\.net\/npm\/@tensorflow|huggingface\.co\/ozzyonfire\/bird-species-classifier)\//,
             handler: 'CacheFirst',
             options: {
               cacheName: 'birdshot-models',
-              expiration: { maxEntries: 12, maxAgeSeconds: 60 * 60 * 24 * 90 },
+              expiration: { maxEntries: 64, maxAgeSeconds: 60 * 60 * 24 * 90 },
             },
           },
         ],
