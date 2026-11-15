@@ -78,6 +78,7 @@ const makeBird = (item, extra = {}) => ({
 })
 let payload = baseline(), indexStatus = 200, detailStatus = 200, indexDelay = 0, detailDelay = 0, originalStatus = 200, originalDelay = 0, previewStatus = 200, previewDelay = 0, missingInstance = false, missingRect = false
 let groupOverride = null, referenceMode = 'ready'
+let originalDimensionsOverride = null
 const referenceRequests = [], referenceDelays = new Map()
 const frameCaptures = new Map()
 const frameShootGroups = new Map()
@@ -121,11 +122,13 @@ const server = createServer(async (request, response) => {
     const name = new URL(request.url, 'http://127.0.0.1').searchParams.get('scientificName')
     referenceRequests.push(name)
     if (referenceDelays.has(name)) await new Promise(resolve => setTimeout(resolve, referenceDelays.get(name)))
-    response.writeHead(referenceMode === 'error' ? 503 : 200, { 'Content-Type': 'application/json' })
-    response.end(JSON.stringify({ status: referenceMode, scientificName: name,
-      article: referenceMode === 'ready' ? { title: '模拟百科', url: 'https://zh.wikipedia.org/wiki/Synthetic_test', language: 'zh' } : null,
-      image: referenceMode === 'ready' ? { url: '/species-media/' + 'a'.repeat(64) + '.jpg', sourceUrl: 'https://commons.wikimedia.org/wiki/File:Synthetic_test.jpg', author: hostile, license: 'CC BY-SA 4.0', licenseUrl: 'https://creativecommons.org/licenses/by-sa/4.0/' } : null,
-      message: referenceMode === 'error' ? '模拟公开网络超时' : null,
+    const partial = referenceMode === 'busyPartial', english = referenceMode === 'english'
+    response.writeHead(referenceMode === 'error' || partial ? 503 : 200, { 'Content-Type': 'application/json' })
+    response.end(JSON.stringify({ status: partial ? 'error' : english ? 'ready' : referenceMode, scientificName: name,
+      article: referenceMode === 'ready' || partial || english ? { title: '模拟百科', url: english ? 'https://en.wikipedia.org/wiki/Synthetic_test' : 'https://zh.wikipedia.org/wiki/Synthetic_test', language: english ? 'en' : 'zh' } : null,
+      image: referenceMode === 'ready' || english ? { url: '/species-media/' + 'a'.repeat(64) + '.jpg', sourceUrl: 'https://commons.wikimedia.org/wiki/File:Synthetic_test.jpg', author: hostile, license: 'CC BY-SA 4.0', licenseUrl: 'https://creativecommons.org/licenses/by-sa/4.0/' } : null,
+      message: referenceMode === 'error' ? '模拟公开网络超时' : partial ? 'Wikimedia繁忙' : null,
+      reasonCode: partial ? 'upstreamBusy' : null, retryAfterSeconds: 120, partial,
     }))
   } else if (path.startsWith('/species-media/')) {
     response.writeHead(200, { 'Content-Type': 'image/svg+xml' }); response.end(placeholder)
@@ -139,7 +142,8 @@ const server = createServer(async (request, response) => {
   } else if (/^\/original\/p\d{6}$/.test(path)) {
     if (originalDelay) await new Promise(resolve => setTimeout(resolve, originalDelay))
     if (new URL(request.url, 'http://127.0.0.1').searchParams.get('download') === '1') response.setHeader('Content-Disposition', 'attachment; filename="simulated-original.svg"')
-    response.writeHead(originalStatus, { 'Content-Type': originalStatus === 200 ? 'image/svg+xml' : 'text/plain' }); response.end(originalStatus === 200 ? placeholder.replace('width="400" height="300"', 'width="4000" height="6000"') : 'Synthetic original read error')
+    const dimensions = originalDimensionsOverride || frameDimensions.get(path.split('/').at(-1)) || { width: 4000, height: 6000 }
+    response.writeHead(originalStatus, { 'Content-Type': originalStatus === 200 ? 'image/svg+xml' : 'text/plain' }); response.end(originalStatus === 200 ? placeholder.replace('width="400" height="300"', 'width="' + dimensions.width + '" height="' + dimensions.height + '"') : 'Synthetic original read error')
   } else if (path.startsWith('/media/')) {
     response.writeHead(200, { 'Content-Type': 'image/svg+xml' }); response.end(placeholder)
   } else {
@@ -182,12 +186,14 @@ try {
   assert.equal(await page.locator('.tile').first().locator('.species-candidate').count(), 3, '兼容 Top5 时只显示前三候选')
   assert.ok(!(await page.locator('#gallery').textContent()).includes('不得展示第四候选'))
   assert.ok(!(await page.locator('#gallery').textContent()).includes('不得展示第五候选'))
-  assert.match(await page.locator('.tile').first().textContent(), /概率 0\.3333%/, '不得按Top3重新归一化分类分数')
+  assert.match(await page.locator('.tile').first().textContent(), /概率 0\.3%/, '只保留一位小数，不按Top3重新归一化')
   assert.deepEqual(await page.locator('.tile').first().locator('.badges .badge').allTextContents(), ['鸟类候选', '高像素', '连拍代表'])
   assert.deepEqual(await page.locator('.tile').nth(1).locator('.badges .badge').allTextContents(), ['鸟类候选', '标准像素'])
   assert.ok(!(await page.locator('#gallery').textContent()).match(/分类模型|类别覆盖|技术选片依据|后端|模拟数据：|Simulation primus/), '卡片只保留简洁候选、标签及拍摄信息')
   assert.equal(await page.locator('a[href="/legacy/"],a[href="/mapping.json"],a[href="/manifest.json"]').count(), 0)
-  assert.equal(await page.locator('.tile').first().locator('.english-name').first().textContent(), 'Simulated bird A')
+  assert.equal(await page.locator('#gallery .english-name').count(), 0, '主页只显示中文名和原概率')
+  assert.deepEqual(await page.evaluate(() => [null, undefined, '0.5', -1, 1.1].map(probability => classificationScores({ probability }))), Array(5).fill('概率未提供'), '非法/缺值不格式化成0.0')
+  assert.equal(referenceRequests.length, 0, '主页不请求参考图或百科')
   await page.getByRole('button', { name: '下一页', exact: true }).click()
   assert.equal(await page.locator('.tile').count(), 12)
   assert.equal((await ids())[0], 'simulated-49')
@@ -234,34 +240,37 @@ try {
   assert.deepEqual([...new Set(referenceRequests)].sort(), ['Simulation primus', 'Simulation secundus', 'Simulation tertius'])
   assert.equal(referenceRequests.length, 3, '只在详情请求前三个唯一学名，不预抓整面图墙或Top5')
   assert.equal(await page.locator('.classification-details a[href^="https://zh.wikipedia.org/"]').count(), 3)
-  assert.equal(await page.locator('.reference-credit').count(), 3)
+  await page.waitForFunction(() => document.querySelectorAll('.reference-source').length === 3)
+  assert.equal(await page.locator('.species-candidate .reference-credit,.species-candidate details').count(), 0)
+  assert.equal(await page.locator('.reference-sources').evaluate(node => node.open), false)
   assert.equal(await page.locator('.classification-details img[src="x"]').count(), 0, '作者元数据只能当文本')
   assert.match(await page.locator('#dialog-title').textContent(), /模拟鸟种 A · 实例 0/)
   assert.equal(await page.locator('.details-copy>h3').count(), 0, '不重复显示鸟名与实例行')
-  assert.equal(await page.locator('.image-controls .switch-control').count(), 2)
+  assert.equal(await page.locator('.image-controls .overlay-toggle').count(), 2)
+  assert.equal(await page.locator('.image-controls input,.image-controls [role=switch]').count(), 0, '按钮内不再嵌套小开关')
   assert.equal(await page.locator('#candidates>h3').textContent(), '鸟体对比')
-  assert.ok(!(await page.locator('.classification-details').textContent()).match(/覆盖|来源|状态|原始类别|学名|正确率|Simulation primus/))
+  assert.ok(!(await page.locator('.classification-details .species-candidates').textContent()).match(/覆盖|来源|状态|原始类别|学名|正确率|Simulation primus/))
   assert.ok(!(await page.locator('#focus-panel').innerText()).match(/鸟类判别|分类模型|查看本地验鸟判据|birdMass|后端/))
   assert.deepEqual(await page.locator('.details-copy > .classification-details, .details-copy > .capture-details, .details-copy > .technical-details').evaluateAll(nodes => nodes.map(node => node.className)), ['classification-details', 'capture-details', 'technical-details'])
   assert.equal(await page.locator('#focus-panel [data-instance-mask]').count(), 0)
   assert.equal(await page.locator('#focus-panel [data-pose-point]').count(), 0, '新详情默认不绘制任何叠加')
-  assert.ok(!(await page.getByRole('switch', { name: '分割轮廓', exact: true }).isChecked()))
-  assert.ok(!(await page.getByRole('switch', { name: '姿态点', exact: true }).isChecked()))
+  assert.ok(!(await page.getByRole('button', { name: '分割轮廓', exact: true }).evaluate(node => node.getAttribute('aria-pressed') === 'true')))
+  assert.ok(!(await page.getByRole('button', { name: '姿态点', exact: true }).evaluate(node => node.getAttribute('aria-pressed') === 'true')))
   assert.ok(!(await page.locator('.classification-details').textContent()).includes('不得展示第四候选'))
   assert.equal(await page.locator('.candidate').count(), 5, '组内其他鸟体、非鸟、未知及无分类实例应同时可浏览')
   assert.match(await page.locator('#candidates').textContent(), /未识别/)
   assert.match(await page.locator('#candidates').textContent(), /未检出鸟体，无鸟体裁剪/)
-  await page.getByRole('switch', { name: '分割轮廓', exact: true }).focus()
+  await page.getByRole('button', { name: '分割轮廓', exact: true }).focus()
   await page.keyboard.press('Space')
   assert.equal(await page.locator('#focus-panel [data-instance-mask]').count(), 1, '键盘可打开分割开关')
   assert.equal(await page.locator('#focus-panel [data-pose-point]').count(), 0)
-  await page.getByRole('switch', { name: '姿态点', exact: true }).check()
+  await page.getByRole('button', { name: '姿态点', exact: true }).click()
   assert.equal(await page.locator('#focus-panel [data-pose-point]').count(), 1, '只画高置信候选点')
   assert.equal(await page.locator('#focus-panel [data-instance-mask]').count(), 1)
-  await page.getByRole('switch', { name: '分割轮廓', exact: true }).uncheck()
+  await page.getByRole('button', { name: '分割轮廓', exact: true }).click()
   assert.equal(await page.locator('#focus-panel [data-instance-mask]').count(), 0)
   assert.equal(await page.locator('#focus-panel [data-pose-point]').count(), 1, '两个开关彼此独立，不互斥')
-  await page.getByRole('switch', { name: '姿态点', exact: true }).uncheck()
+  await page.getByRole('button', { name: '姿态点', exact: true }).click()
   assert.equal(await page.locator('#focus-panel [data-pose-point]').count(), 0)
   await page.locator('.technical-details summary').click()
   assert.match(await page.locator('.technical-details').innerText(), /模拟眼睛不可见/)
@@ -270,8 +279,8 @@ try {
   await page.getByRole('button', { name: '查看组内实例 2 · 模拟来源-002.jpg', exact: true }).click()
   assert.match(await page.locator('#focus-panel').textContent(), /待确认/)
   assert.match(await page.locator('#focus-panel').textContent(), /未入选/)
-  assert.ok(await page.getByRole('switch', { name: '姿态点', exact: true }).isDisabled())
-  assert.ok(!(await page.getByRole('switch', { name: '分割轮廓', exact: true }).isChecked()))
+  assert.ok(await page.getByRole('button', { name: '姿态点', exact: true }).isDisabled())
+  assert.ok(!(await page.getByRole('button', { name: '分割轮廓', exact: true }).evaluate(node => node.getAttribute('aria-pressed') === 'true')))
   assert.equal(await page.locator('#focus-panel [data-instance-mask]').count(), 0, '切换实例不能残留上一实例叠加')
   assert.equal(requests.some(path => path.startsWith('/original/')), false, '切换裁剪不能暗中加载原图')
   assert.equal(await page.locator('.original-toggle').getAttribute('aria-pressed'), 'false')
@@ -298,8 +307,8 @@ try {
   missingRect = true
   await page.locator('.tile-open').first().click()
   await page.locator('#focus-panel').waitFor()
-  assert.ok(await page.getByRole('switch', { name: '分割轮廓', exact: true }).isDisabled())
-  assert.ok(await page.getByRole('switch', { name: '姿态点', exact: true }).isDisabled())
+  assert.ok(await page.getByRole('button', { name: '分割轮廓', exact: true }).isDisabled())
+  assert.ok(await page.getByRole('button', { name: '姿态点', exact: true }).isDisabled())
   assert.match(await page.locator('#focus-panel').textContent(), /缺少有效裁剪坐标/)
   await page.getByRole('button', { name: '关闭', exact: true }).click()
   missingRect = false
@@ -327,11 +336,11 @@ try {
   const top3Tile = page.locator('.tile').first()
   assert.equal(await top3Tile.locator('.species-candidate').count(), 2, '只显示有效实际候选，不补齐三项')
   assert.match(await top3Tile.textContent(), /中文名待补/)
-  assert.match(await top3Tile.textContent(), /英文名待补/)
+  assert.equal(await top3Tile.locator('.english-name').count(), 0)
   assert.ok(!(await top3Tile.textContent()).includes('Simulation untranslated'), '拉丁学名不能充当常用英文名')
-  assert.match(await top3Tile.textContent(), /Simulated standard English bird/)
+  assert.ok(!(await top3Tile.textContent()).includes('Simulated standard English bird'), '主页不回退显示英文')
   assert.match(await top3Tile.textContent(), /模拟规范中文候选/)
-  assert.match(await top3Tile.textContent(), /概率 0\.0034%/)
+  assert.match(await top3Tile.textContent(), /概率 0\.0%/)
   assert.ok(!(await top3Tile.textContent()).includes('模拟鸟种 A'), '明确Top3优先于兼容Top5')
   assert.equal(await page.locator('.tile').nth(1).locator('.species-candidate').count(), 0, '明确空Top3不能用旧Top5凑数')
   await page.locator('#search').fill('模拟规范中文候选')
@@ -341,7 +350,7 @@ try {
   await page.locator('#focus-panel').waitFor()
   assert.equal(await page.locator('.classification-details .species-candidate').count(), 2)
   assert.match(await page.locator('.classification-details').textContent(), /中文名待补/)
-  assert.ok(!(await page.locator('.classification-details').textContent()).match(/Original label|模拟缺名|模拟权威表来源|Simulation sinensis/))
+  assert.ok(!(await page.locator('.classification-details .species-candidates').textContent()).match(/Original label|模拟缺名|模拟权威表来源|Simulation sinensis/))
   assert.match(await page.locator('.classification-details').textContent(), /英文名待补/)
   assert.match(await page.locator('.classification-details').textContent(), /Simulated standard English bird/)
   assert.ok(!(await page.locator('#focus-panel').textContent()).match(/Birder（模拟接口测试|鸟类判别/))
@@ -350,7 +359,7 @@ try {
   await page.getByRole('tab', { name: /独立审核/ }).click()
   await page.locator('#verification').selectOption('nonBird')
   assert.deepEqual(await ids(), ['simulated-61'])
-  assert.equal(await page.locator('.species-candidate strong').first().textContent(), '1. 非鸟类别')
+  assert.equal(await page.locator('.species-candidate strong').first().textContent(), '非鸟类别')
   assert.ok(!(await page.locator('#gallery').textContent()).includes('simulated_background_class'), '不展示原始分类ID')
   assert.equal(await page.locator('.tile').first().locator('.species-candidate').count(), 2)
   await page.getByRole('tab', { name: /优选鸟体/ }).click()
@@ -444,8 +453,8 @@ try {
 
   payload = baseline()
   payload.items.find(item => item.rank === 1).species.top3 = [
-    { commonName: '模拟规范中文长名称用于手机换行检查', scientificName: 'Simulation_' + 'longscientificname'.repeat(8), probability: .000034, isBird: true },
-    { commonName: '模拟第二中文候选', scientificName: 'Simulation secundus subspecies syntheticus', probability: .000021, isBird: true },
+    { commonName: '模拟规范中文长名称用于手机换行检查', englishName: 'A deliberately extremely long English common bird name that must wrap without clipping', scientificName: 'Simulation_' + 'longscientificname'.repeat(8), probability: .000034, isBird: true },
+    { commonName: '模拟第二中文候选', englishName: 'Short bird', scientificName: 'Simulation secundus subspecies syntheticus', probability: .000021, isBird: true },
     { commonName: '中文名待补', scientificName: 'Simulation tertius untranslated', probability: .00001, isBird: true },
   ]
   payload.items.find(item => item.rank === 1).capture = {
@@ -470,6 +479,16 @@ try {
     const label = viewport.width + '×' + viewport.height
     assert.ok(await touch.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), label + ' 图墙不能横向溢出')
     assert.equal(await touch.locator('.tile').count(), 48, label + ' 必须保留有界分页而非加载全部图片')
+    assert.equal(await touch.locator('#gallery .english-name,#gallery .shoot-group-label,#gallery .reference-picture').count(), 0)
+    const miniCards = await touch.locator('.tile').first().locator('.species-candidate').evaluateAll(nodes => nodes.map(node => ({ x: node.getBoundingClientRect().x, y: node.getBoundingClientRect().y })))
+    assert.ok(miniCards.every(card => Math.abs(card.y - miniCards[0].y) < 1) && miniCards[0].x < miniCards[1].x && miniCards[1].x < miniCards[2].x, label + ' 主页候选固定三列')
+    assert.ok(await touch.locator('.tile').first().evaluate(tile => {
+      const grid = tile.querySelector('.species-candidates'), cards = [...grid.children], gap = parseFloat(getComputedStyle(grid).columnGap)
+      return Math.abs(grid.getBoundingClientRect().width - tile.clientWidth) < 1 &&
+        cards.every(card => Math.abs(card.getBoundingClientRect().width - (grid.getBoundingClientRect().width - gap * 2) / 3) < 1)
+    }), label + ' 候选条实际铺满整个主卡宽度并三等分，不止内容内宽')
+    const footerParts = await touch.locator('.tile').first().locator('.capture-summary>span').evaluateAll(nodes => nodes.map(node => ({ x: node.getBoundingClientRect().x, y: node.getBoundingClientRect().y })))
+    assert.ok(footerParts[0].x < footerParts[1].x && Math.abs(footerParts[0].y - footerParts[1].y) < 1, label + ' 底部单行左时间右地点')
     for (const selector of ['#refresh', '#search', '#tier', '#sort', '#preferred-tab']) {
       const box = await touch.locator(selector).boundingBox()
       assert.ok(box.height >= 44, label + ' 触控区域至少44px：' + selector)
@@ -485,17 +504,25 @@ try {
     assert.equal(await touch.locator('#close').evaluate(node => getComputedStyle(node).borderTopWidth), '0px')
     const cards = await touch.locator('.classification-details .species-candidate').evaluateAll(nodes => nodes.map(node => ({ x: node.getBoundingClientRect().x, y: node.getBoundingClientRect().y })))
     assert.ok(cards.every(card => Math.abs(card.y - cards[0].y) < 1) && cards[1].x > cards[0].x && cards[2].x > cards[1].x, label + ' Top3保持三列卡片')
+    const equalCards = await touch.locator('.classification-details .species-candidate').evaluateAll(nodes => nodes.map(node => {
+      const box = node.getBoundingClientRect(), footer = node.querySelector('.reference-links').getBoundingClientRect()
+      return { height: box.height, bottom: footer.bottom, width: footer.width, inner: node.clientWidth }
+    }))
+    assert.ok(equalCards.every(card => Math.abs(card.height - equalCards[0].height) < 1 && Math.abs(card.bottom - equalCards[0].bottom) < 1 && Math.abs(card.width - card.inner) < 1), label + ' 长中英文的整卡等高且百科底部stretch')
+    assert.ok((await touch.locator('.classification-details .classification-score').allTextContents()).every(text => /^概率 \d+\.\d%$/.test(text)))
     await touch.locator('.preview-area[aria-busy="false"]').waitFor()
     const originalBox = await touch.locator('.original-toggle').boundingBox(), areaBox = await touch.locator('.preview-area').boundingBox()
     assert.ok(originalBox.height >= 44 && originalBox.x + originalBox.width <= areaBox.x + areaBox.width && originalBox.y + originalBox.height <= areaBox.y + areaBox.height, '原图icon toggle必须在图片右下角且适合触控')
     assert.ok(!(await touch.locator('#focus-panel .technical-details').evaluate(node => node.open)), '技术依据默认折叠')
     assert.equal(await touch.locator('#focus-panel [data-instance-mask],#focus-panel [data-pose-point]').count(), 0)
     for (const name of ['分割轮廓', '姿态点']) {
-      assert.ok(!(await touch.getByRole('switch', { name, exact: true }).isChecked()))
-      assert.ok((await touch.getByRole('switch', { name, exact: true }).locator('..').boundingBox()).height >= 44)
-      const box = await touch.getByRole('switch', { name, exact: true }).locator('..').boundingBox()
+      assert.ok(!(await touch.getByRole('button', { name, exact: true }).evaluate(node => node.getAttribute('aria-pressed') === 'true')))
+      assert.ok((await touch.getByRole('button', { name, exact: true }).boundingBox()).height >= 44)
+      const box = await touch.getByRole('button', { name, exact: true }).boundingBox()
       assert.ok(box.y >= areaBox.y && box.y + box.height <= areaBox.y + areaBox.height + 1, '两个叠加控件均在图片内部底部')
     }
+    const alpha = await touch.locator('.image-controls button').evaluateAll(nodes => nodes.map(node => Number(getComputedStyle(node).backgroundColor.match(/,\s*([\d.]+)\)$/)?.[1] || 1)))
+    assert.ok(alpha.every(value => value >= .25 && value <= .35), '三个未选按钮保持高通透度而非整体变淡')
     await touch.locator('#focus-panel .technical-details summary').tap()
     assert.match(await touch.locator('#focus-panel .technical-details').innerText(), /主体内部梯度/)
     await touch.locator('#dialog').evaluate(node => { node.scrollTop = node.scrollHeight })
@@ -584,19 +611,21 @@ try {
   await capturePage.goto(origin)
   await capturePage.locator('.tile').first().waitFor()
   const captureTile = rank => capturePage.locator('.tile-open[data-item-id="simulated-' + rank + '"]')
-  assert.match(await captureTile(1).locator('.capture-summary').textContent(), /2001年2月3日 04:05（相机时间，时区未记录）/)
-  assert.match(await captureTile(1).locator('.capture-summary').textContent(), /南纬 33\.5° · 西经 70\.25°/)
-  assert.match(await captureTile(2).locator('.capture-summary').textContent(), /2002年3月4日 05:06（北京时间）/)
-  assert.match(await captureTile(11).locator('.capture-summary').textContent(), /2001年2月4日 04:30（北京时间）/, 'UTC时间应固定转换为北京时间，含跨日')
-  assert.match(await captureTile(12).locator('.capture-summary').textContent(), /2001年2月4日 10:45（北京时间）/, '其他已知offset同样转北京时间，不受浏览器Honolulu时区影响')
-  assert.match(await captureTile(13).locator('.capture-summary').textContent(), /2001年2月3日 09:10（北京时间）/, '独立时区字段明确时可转换')
-  assert.match(await captureTile(14).locator('.capture-summary').textContent(), /拍摄时间格式无效/, '无效日期不能经Date自动溢出为另一天')
+  assert.match(await captureTile(1).locator('.capture-time').textContent(), /2001\/02\/03 04:05/)
+  assert.match(await captureTile(1).locator('.capture-time').getAttribute('title'), /相机时间，时区未记录/)
+  assert.equal(await captureTile(1).locator('.capture-place').textContent(), '已记录位置')
+  assert.match(await captureTile(2).locator('.capture-summary').textContent(), /2002\/03\/04 05:06/)
+  assert.match(await captureTile(11).locator('.capture-summary').textContent(), /2001\/02\/04 04:30/, 'UTC时间应固定转换为北京时间，含跨日')
+  assert.match(await captureTile(12).locator('.capture-summary').textContent(), /2001\/02\/04 10:45/, '其他已知offset同样转北京时间，不受浏览器Honolulu时区影响')
+  assert.match(await captureTile(13).locator('.capture-summary').textContent(), /2001\/02\/03 09:10/, '独立时区字段明确时可转换')
+  assert.equal(await captureTile(14).locator('.capture-time').textContent(), '时间未知')
+  assert.match(await captureTile(14).locator('.capture-time').getAttribute('title'), /拍摄时间格式无效/, '无效日期不能经Date自动溢出为另一天')
   assert.ok(!(await capturePage.locator('#gallery').textContent()).match(/T\d\d:\d\d|\.123456|\+08:00/), '页面不显示ISO串、毫秒或原始offset')
-  assert.match(await captureTile(3).locator('.capture-summary').textContent(), /未记录拍摄时间.*未记录位置/)
-  for (const rank of [4, 6]) assert.match(await captureTile(rank).locator('.capture-summary').textContent(), /元数据尚未读取/)
-  assert.match(await captureTile(5).locator('.capture-summary').textContent(), /读取失败/)
+  assert.match(await captureTile(3).locator('.capture-summary').textContent(), /时间未知.*未知地点/)
+  for (const rank of [4, 6]) assert.match(await captureTile(rank).locator('.capture-time').getAttribute('title'), /元数据尚未读取/)
+  assert.match(await captureTile(5).locator('.capture-time').getAttribute('title'), /读取失败/)
   assert.ok(!(await capturePage.locator('#gallery').textContent()).includes('DO_NOT_SHOW'))
-  for (const rank of [7, 8, 10]) assert.match(await captureTile(rank).locator('.capture-summary').textContent(), /位置数据无效或非 EXIF WGS84/)
+  for (const rank of [7, 8, 10]) assert.match(await captureTile(rank).locator('.capture-place').getAttribute('title'), /位置数据无效或非 EXIF WGS84/)
   assert.ok(captureRequests.every(url => new URL(url).origin === origin), '显示EXIF坐标不能自动请求GIS、瓦片或地理编码')
   assert.equal(await capturePage.locator('#gallery a[href*="openstreetmap"]').count(), 0, '卡片按钮内不嵌套外部地图交互')
   await captureTile(1).tap()
@@ -708,10 +737,11 @@ try {
   await shootPage.getByRole('tab', { name: /优选鸟体/ }).tap()
   await selectShoot('sim-unknown-day-1')
   assert.deepEqual(await shootIds(), ['simulated-58', 'simulated-59'])
-  assert.match(await shootPage.locator('.capture-summary').first().textContent(), /未知地点 - 010203.*地点：未知地点.*未记录位置/)
+  assert.match(await shootPage.locator('.capture-summary').first().textContent(), /2001\/02\/03 09:10.*未知地点/)
+  assert.equal(await shootPage.locator('#gallery .shoot-group-label').count(), 0)
   await selectShoot('sim-place-a-no-date')
   assert.deepEqual(await shootIds(), ['simulated-60'])
-  assert.match(await shootPage.locator('.capture-summary').first().textContent(), /日期未知.*未记录拍摄时间/)
+  assert.match(await shootPage.locator('.capture-summary').first().textContent(), /时间未知.*模拟观鸟地甲/)
   const detailsBeforeGrouping = shootRequests.filter(url => new URL(url).pathname.startsWith('/gallery/group/')).length
   await selectShoot('sim-place-a-day-1')
   assert.match(await shootPage.locator('#shoot-group-status').textContent(), /原图 50 · 裁剪 51 · 优选 50/, '原图/裁剪/优选为不同目录计数，不按卡片数误标')
@@ -794,8 +824,8 @@ try {
   assert.equal(originalCount(), 0, '初次加载和打开详情不请求原片')
   assert.match(await previewImage().getAttribute('src'), /^\/media\//)
   assert.equal(await photoPage.locator('a[href^="/original/"]').count(), 0)
-  await photoPage.getByRole('switch', { name: '分割轮廓', exact: true }).check()
-  await photoPage.getByRole('switch', { name: '姿态点', exact: true }).check()
+  await photoPage.getByRole('button', { name: '分割轮廓', exact: true }).click()
+  await photoPage.getByRole('button', { name: '姿态点', exact: true }).click()
   assert.equal(await photoPage.locator('.crop-wrap>svg').getAttribute('viewBox'), '100 200 400 300')
   previewDelay = 150
   await photoPage.locator('.original-toggle').tap()
@@ -953,6 +983,24 @@ try {
   assert.deepEqual(await smallPage.locator('.crop-wrap img:visible').evaluate(image => [image.naturalWidth, image.naturalHeight]), [400, 600], '小源图预览不被上采样')
   assert.equal(smallRequests.filter(url => new URL(url).pathname.startsWith('/original/')).length, 0)
   await smallPage.close(); frameDimensions.clear()
+  const mismatchPage = await photoContext.newPage()
+  originalDimensionsOverride = { width: 400, height: 600 }
+  await mismatchPage.goto(origin)
+  await mismatchPage.locator('.tile-open').first().click()
+  await mismatchPage.locator('.preview-area[aria-busy="false"]').waitFor()
+  await mismatchPage.locator('.original-toggle').click()
+  await mismatchPage.locator('.preview-area[aria-busy="false"]').waitFor()
+  await mismatchPage.locator('.crop-wrap img:visible').click()
+  await mismatchPage.evaluate(() => { state.photo.scale = state.photo.maxScale; transformPhoto(); state.preview.schedule() })
+  await mismatchPage.locator('#photo-status[role=alert]').waitFor()
+  assert.match(await mismatchPage.locator('#photo-status').textContent(), /解码尺寸.*不一致/)
+  assert.ok(!(await mismatchPage.locator('#photo-status').textContent()).includes('原文件已加载'))
+  assert.match(await mismatchPage.locator('#photo-stage img').getAttribute('src'), /^\/preview\//, '错误原图尺寸不能替换已加载低档或标成功')
+  originalDimensionsOverride = null
+  await mismatchPage.locator('#photo-retry').click()
+  await mismatchPage.locator('#photo-stage img[src^="/original/"]').waitFor()
+  assert.match(await mismatchPage.locator('#photo-status').textContent(), /原文件已加载/)
+  await mismatchPage.close()
   assert.ok(photoRequests.every(url => new URL(url).origin === origin))
   assert.deepEqual(photoErrors, [])
   await photoContext.close()
@@ -997,6 +1045,21 @@ try {
     assert.equal(await comparePage.locator('.classification-details .reference-picture img').count(), 0)
     assert.equal(await comparePage.locator('.classification-details .classification-score').count(), 3, '参考缺失不阻塞原有概率')
     assert.equal(await comparePage.locator('#focus-panel .crop-wrap img').count(), 1)
+    const heights = await comparePage.locator('.classification-details .species-candidate').evaluateAll(nodes => nodes.map(node => node.getBoundingClientRect().height))
+    assert.ok(heights.every(height => Math.abs(height - heights[0]) < 1), '无图/错误占位下卡片仍等高')
+    await comparePage.locator('#close').click()
+  }
+  for (const mode of ['english', 'busyPartial']) {
+    referenceMode = mode
+    await comparePage.locator('.tile-open').first().click()
+    await comparePage.locator('.reference-links>a').first().waitFor()
+    assert.ok((await comparePage.locator('.reference-links>a').evaluateAll(nodes => nodes.map(node => node.href))).every(url => url.startsWith('https://zh.wikipedia.org/')))
+    if (mode === 'english') assert.equal(await comparePage.getByRole('link', { name: /中文百科搜索/ }).count(), 3, '旧英文缓存也转明确中文搜索而非伪造中文词条')
+    else {
+      await comparePage.getByText('公开资料繁忙', { exact: true }).first().waitFor()
+      assert.equal(await comparePage.locator('.reference-links>a').count(), 3, '图片上游失败不丢已核实词条')
+      assert.ok(await comparePage.locator('.reference-refresh').first().isDisabled(), '遵守重试时间，不立即重打上游')
+    }
     await comparePage.locator('#close').click()
   }
   referenceMode = 'ready'
@@ -1069,13 +1132,13 @@ try {
     assert.equal(await live.locator('.tile').count(), Math.min(48, preferred.length))
     assert.ok(await live.evaluate(() => document.documentElement.scrollWidth <= innerWidth + 1), '真实索引的中文Top3和模型文字在手机上不能溢出')
     const firstPreferred = preferred.toSorted((a, b) => a.rank - b.rank)[0]
-    if (firstPreferred?.species?.top3?.[0]?.englishName) assert.equal(await live.locator('.tile').first().locator('.english-name').first().textContent(), firstPreferred.species.top3[0].englishName, '真实常用英文上线后原样展示，不用拉丁学名代替')
+    assert.equal(await live.locator('#gallery .english-name').count(), 0, '主页不显示英文，数据与详情仍保留')
     if (firstPreferred?.capture?.status === 'ready') {
       if (firstPreferred.capture.time) {
-        assert.match(await live.locator('.tile').first().locator('.capture-summary').textContent(), /\d{4}年\d{1,2}月\d{1,2}日 \d{2}:\d{2}/, '真实拍摄时间应本地化，不保存或输出具体EXIF')
+        assert.match(await live.locator('.tile').first().locator('.capture-summary').textContent(), /\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}/, '真实拍摄时间应本地化，不保存或输出具体EXIF')
         assert.ok(!(await live.locator('.tile').first().locator('.capture-summary').textContent()).includes(firstPreferred.capture.time), '界面不显示原始ISO时间')
       }
-      if (!firstPreferred.capture.location) assert.match(await live.locator('.tile').first().locator('.capture-summary').textContent(), /未记录位置/)
+      if (!firstPreferred.capture.location && !firstPreferred.capture.placeName) assert.match(await live.locator('.tile').first().locator('.capture-summary').textContent(), /未知地点/)
       await live.locator('.tile-open').first().click()
       await live.locator('#focus-panel').waitFor()
       if (!firstPreferred.capture.location) {
@@ -1135,7 +1198,7 @@ try {
       const initialSize = await live.locator('.crop-wrap img:visible').evaluate(image => [image.naturalWidth, image.naturalHeight])
       assert.ok(Math.max(...initialSize) <= 1920)
       assert.ok(Math.abs(initialSize[0] / initialSize[1] - probeFrame.width / probeFrame.height) < .002, '预览方向必须对应EXIF转正后的frame比例')
-      await live.getByRole('switch', { name: '分割轮廓', exact: true }).check()
+      await live.getByRole('button', { name: '分割轮廓', exact: true }).click()
       assert.equal(await live.locator('.crop-wrap>svg').getAttribute('viewBox'), [0, 0, probeFrame.width, probeFrame.height].join(' '))
       await live.locator('.crop-wrap img:visible').click()
       await live.waitForFunction(() => document.getElementById('photo-viewer').open)

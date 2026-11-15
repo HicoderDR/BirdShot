@@ -28,8 +28,15 @@ try {
   page.on('pageerror', error => errors.push(error.message))
   await page.goto(base.href)
   await page.locator('#gallery[aria-busy="false"]').waitFor()
+  assert.equal(await page.locator('#gallery .english-name,#gallery .reference-picture,#gallery .shoot-group-label').count(), 0)
+  assert.equal(requests.filter(url => new URL(url).pathname === '/species-reference').length, 0)
   for (const viewport of [{ width: 360, height: 800 }, { width: 390, height: 844 }, { width: 844, height: 390 }]) {
     await page.setViewportSize(viewport)
+    const miniCards = await page.locator('.tile').first().locator('.species-candidate').evaluateAll(nodes => nodes.map(node => ({ x: node.getBoundingClientRect().x, y: node.getBoundingClientRect().y })))
+    assert.ok(miniCards.every(card => Math.abs(card.y - miniCards[0].y) < 1) && miniCards[0].x < miniCards[1].x && miniCards[1].x < miniCards[2].x)
+    assert.ok(await page.locator('.tile').first().evaluate(tile => Math.abs(tile.querySelector('.species-candidates').getBoundingClientRect().width - tile.clientWidth) < 1))
+    const meta = await page.locator('.tile').first().locator('.capture-summary>span').evaluateAll(nodes => nodes.map(node => ({ x: node.getBoundingClientRect().x, y: node.getBoundingClientRect().y })))
+    assert.ok(meta[0].x < meta[1].x && Math.abs(meta[0].y - meta[1].y) < 1)
     for (const item of selected) {
       await page.evaluate(candidate => openDetail(candidate), item)
       await page.locator('.preview-area[aria-busy="false"]').waitFor()
@@ -37,6 +44,7 @@ try {
         const images = [...document.querySelectorAll('.classification-details .reference-picture img')]
         return images.length === 3 && images.every(image => image.complete && image.naturalWidth > 0)
       }, undefined, { timeout: 60000 })
+      await page.waitForFunction(() => document.querySelectorAll('.reference-source').length === 3)
       assert.equal(await page.locator('#dialog-title').textContent(), item.species.top3[0].commonName + ' · 实例 ' + item.instanceId)
       assert.equal(await page.locator('.details-copy>h3').count(), 0)
       assert.ok(await page.locator('#dialog').evaluate(node => node.scrollWidth <= node.clientWidth + 1))
@@ -52,18 +60,44 @@ try {
         const card = page.locator('.classification-details .species-candidate').nth(position)
         assert.equal(await card.locator('.reference-picture img').getAttribute('src'), reference.image.url)
         assert.equal(await card.locator('.reference-links>a').getAttribute('href'), reference.article.url)
-        assert.ok((await card.locator('.reference-credit').textContent()).includes(reference.image.author))
-        assert.equal(await card.locator('.reference-credit a').first().getAttribute('href'), reference.image.licenseUrl)
+        const source = page.locator('.reference-source').nth(position)
+        assert.ok((await source.textContent()).includes(reference.image.author))
+        assert.equal(await source.locator('a').first().getAttribute('href'), reference.image.licenseUrl)
+        assert.match(await card.locator('.classification-score').textContent(), /^概率 \d+\.\d%$/)
       }
       assert.equal(await page.locator('.image-controls>*').count(), 3)
+      assert.equal(await page.locator('.image-controls input,.image-controls [role=switch]').count(), 0)
+      assert.equal(await page.locator('.classification-details .english-name').count(), 3)
+      const geometry = await page.locator('.classification-details .species-candidate').evaluateAll(nodes => nodes.map(node => ({
+        height: node.getBoundingClientRect().height, bottom: node.querySelector('.reference-links').getBoundingClientRect().bottom,
+      })))
+      assert.ok(geometry.every(card => Math.abs(card.height - geometry[0].height) < 1 && Math.abs(card.bottom - geometry[0].bottom) < 1))
+      const colors = await page.locator('.classification-details .species-candidate').evaluateAll(nodes => nodes.map(node => ({
+        background: getComputedStyle(node).backgroundColor.match(/[\d.]+/g).map(Number),
+        border: getComputedStyle(node).borderTopColor.match(/[\d.]+/g).map(Number),
+      })))
+      assert.ok(colors.every(color => color.background[0] < color.background[1] && color.background[1] < color.background[2] && color.border[0] < color.border[2]))
+      assert.ok(colors.every((color, position) => position === 0 || color.background[3] <= colors[position - 1].background[3]), 'Blue emphasis follows original probability')
+      const bottomStyles = await page.locator('.reference-links').evaluateAll(nodes => nodes.map(node => {
+        const footer = getComputedStyle(node), link = getComputedStyle(node.firstElementChild)
+        return { top: footer.borderTopWidth, sides: [footer.borderLeftWidth, footer.borderRightWidth], linkBorder: link.borderTopWidth, radius: link.borderTopLeftRadius }
+      }))
+      assert.ok(bottomStyles.every(style => style.top === '1px' && style.sides.every(value => value === '0px') && style.linkBorder === '0px' && style.radius === '0px'))
+      const alphas = await page.locator('.image-controls button').evaluateAll(nodes => nodes.map(node => Number(getComputedStyle(node).backgroundColor.match(/,\s*([\d.]+)\)$/)?.[1] || 1)))
+      assert.ok(alphas.every(alpha => alpha >= .25 && alpha <= .35))
       for (const name of ['分割轮廓', '姿态点']) {
-        assert.equal(await page.getByRole('switch', { name, exact: true }).isChecked(), false)
+        assert.equal(await page.getByRole('button', { name, exact: true }).evaluate(node => node.getAttribute('aria-pressed') === 'true'), false)
       }
-      await page.getByRole('switch', { name: '分割轮廓', exact: true }).check()
+      await page.getByRole('button', { name: '分割轮廓', exact: true }).click()
+      const activeStyle = await page.getByRole('button', { name: '分割轮廓', exact: true }).evaluate(node => ({
+        background: getComputedStyle(node).backgroundColor, opacity: getComputedStyle(node).opacity, shadow: getComputedStyle(node).textShadow,
+      }))
+      const activeAlpha = Number(activeStyle.background.match(/,\s*([\d.]+)\)$/)?.[1] || 1)
+      assert.ok(activeAlpha >= .35 && activeAlpha <= .45 && activeStyle.opacity === '1' && activeStyle.shadow !== 'none')
       assert.equal(await page.locator('[data-instance-mask]').count(), 1)
-      assert.equal(await page.getByRole('switch', { name: '姿态点', exact: true }).isChecked(), false)
+      assert.equal(await page.getByRole('button', { name: '姿态点', exact: true }).evaluate(node => node.getAttribute('aria-pressed') === 'true'), false)
       assert.equal(await page.locator('#photo-viewer').evaluate(node => node.open), false)
-      await page.getByRole('switch', { name: '分割轮廓', exact: true }).uncheck()
+      await page.getByRole('button', { name: '分割轮廓', exact: true }).click()
       const group = await (await fetch(new URL('/gallery/group/' + item.groupId + '.json', base))).json()
       const count = group.frames.reduce((sum, frame) => sum + frame.instances.length, 0)
       assert.equal(await page.locator('#candidates').count(), count > 1 ? 1 : 0)
@@ -113,6 +147,47 @@ try {
     viewports: ['360x800', '390x844', '844x390'],
     privatePhotosOrScreenshotsSaved: false, nativePhoneSaveMenuTested: false }))
   await context.close()
+  const nativeProof = []
+  for (const dpr of [1, 3]) {
+    const nativeContext = await browser.newContext({ isMobile: true, hasTouch: true, deviceScaleFactor: dpr, viewport: { width: 360, height: 800 } })
+    const nativePage = await nativeContext.newPage()
+    await nativePage.goto(base.href)
+    await nativePage.locator('#gallery[aria-busy="false"]').waitFor()
+    for (const frameId of ['p000003', 'p000560']) {
+      const target = index.items.find(row => row.frameId === frameId)
+      assert.ok(target)
+      await nativePage.evaluate(candidate => openDetail(candidate), target)
+      await nativePage.locator('.preview-area[aria-busy="false"]').waitFor()
+      await nativePage.locator('.original-toggle').click()
+      await nativePage.locator('.preview-area[aria-busy="false"]').waitFor()
+      const fit = await nativePage.locator('.crop-wrap img:visible').evaluate(image => ({ src: new URL(image.currentSrc).pathname, size: [image.naturalWidth, image.naturalHeight] }))
+      assert.match(fit.src, /\/(960|1920)\.jpg$/)
+      await nativePage.locator('.crop-wrap img:visible').click()
+      await nativePage.evaluate(() => {
+        const geometry = sizePreviewImage(state.preview, document.createElement('img'), 'original', true)
+        state.photo.scale = Math.min(state.photo.maxScale - .01, 3730 / Math.max(geometry.width, geometry.height) / devicePixelRatio)
+        transformPhoto(); state.preview.schedule()
+      })
+      await nativePage.locator('#photo-stage img[src$="/3840.jpg"]').waitFor()
+      const medium = await nativePage.locator('#photo-stage img').evaluate(image => [image.naturalWidth, image.naturalHeight])
+      await nativePage.evaluate(() => { state.photo.scale = state.photo.maxScale; state.photo.x = 25; transformPhoto(); state.preview.schedule() })
+      await nativePage.locator('#photo-stage img[src="/original/' + frameId + '"]').waitFor()
+      const proof = await nativePage.evaluate(() => ({
+        frameId: state.preview.frame.id, dpr: devicePixelRatio, src: new URL(state.photo.image.currentSrc).pathname,
+        natural: [state.photo.image.naturalWidth, state.photo.image.naturalHeight], source: [state.preview.frame.width, state.preview.frame.height],
+        scale: state.photo.scale, maxScale: state.photo.maxScale, native: state.preview.images.get('original').native,
+        status: document.getElementById('photo-status').textContent,
+      }))
+      assert.deepEqual(proof.natural, proof.source)
+      assert.equal(proof.native, true)
+      assert.match(proof.status, /原文件已加载/)
+      nativeProof.push({ ...proof, fit, medium })
+      await nativePage.locator('#photo-exit').click()
+      await nativePage.locator('#close').click()
+    }
+    await nativeContext.close()
+  }
+  console.log(JSON.stringify({ nativeResolutionVerified: nativeProof }))
 } finally {
   await browser.close()
 }

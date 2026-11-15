@@ -15,6 +15,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import threading
@@ -34,6 +35,26 @@ POLICY_VERSION = "strict-crop-only-v1"
 SUPPORTED = {".jpg", ".jpeg", ".png"}
 RAW = {".arw", ".dng", ".nef", ".cr2", ".cr3", ".orf", ".raf", ".rw2"}
 PHOTO_FORMATS = SUPPORTED | RAW | {".tif", ".tiff", ".heic", ".heif", ".webp", ".bmp"}
+
+
+def report_access_allowed(client_ip, host, origin, port, hosts, network=None, allow_all=False, write=False):
+    try:
+        remote = ipaddress.ip_address(client_ip)
+        if remote.version != 4:
+            return False
+        authority = urlparse("//" + host)
+        if authority.username or authority.password or authority.path or authority.query or authority.fragment \
+                or authority.port not in {None, port} or not authority.hostname or any(char.isspace() for char in host):
+            return False
+        hostname = authority.hostname.lower()
+        if hostname not in hosts or origin and origin != "http://" + host:
+            return False
+        local = remote == ipaddress.ip_address("127.0.0.1")
+        if write:
+            return local and hostname in {"127.0.0.1", "localhost"}
+        return allow_all or local or network is not None and remote in network
+    except ValueError:
+        return False
 
 
 def digest(path):
@@ -432,7 +453,7 @@ def run(job, node, threads=4):
             worker.close()
 
 
-def serve(job, port, lan_ip=None, prefix=24):
+def serve(job, port, lan_ip=None, prefix=24, allow_all=False, allowed_hosts=None):
     manifest = read_json(job / "manifest.json")
     source = Path(manifest["source"]).resolve()
     photos = {p["id"]: p for p in manifest["photos"]}
@@ -459,6 +480,17 @@ def serve(job, port, lan_ip=None, prefix=24):
         if not any(address in ipaddress.IPv4Network(block) for block in ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]):
             raise ValueError("LAN service requires the explicitly selected RFC1918 interface address")
         lan_network = ipaddress.IPv4Network(f"{lan_ip}/{prefix}", strict=False)
+    hosts = {"127.0.0.1", "localhost"} | ({lan_ip} if lan_ip else set())
+    if allow_all:
+        hosts.add(socket.gethostname().lower())
+        try:
+            hosts.update(row[4][0] for row in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET, socket.SOCK_STREAM))
+        except socket.gaierror:
+            print("Local IPv4 discovery failed; use --allowed-host for an additional local address", file=sys.stderr)
+    for hostname in allowed_hosts or []:
+        if not re.fullmatch(r"[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?", hostname):
+            raise ValueError("--allowed-host requires an exact hostname or IPv4, without URL/path/port")
+        hosts.add(hostname.lower())
     allowed_media = set()
     media_mapping_signature = None
     def refresh_registered_media():
@@ -477,15 +509,14 @@ def serve(job, port, lan_ip=None, prefix=24):
     refresh_registered_media()
     compressed_cache = {}
     class Handler(BaseHTTPRequestHandler):
+        def end_headers(self):
+            self.send_header("X-BirdShot-Access-Mode", "all-sources-read-only" if allow_all else "restricted")
+            super().end_headers()
         def log_message(self, *_):
             pass
-        def allowed(self):
-            host = self.headers.get("Host", "")
-            origin = self.headers.get("Origin")
-            remote = ipaddress.ip_address(self.client_address[0])
-            remote_allowed = remote == ipaddress.ip_address("127.0.0.1") or (lan_network is not None and remote in lan_network)
-            host_allowed = host.split(":")[0].lower() in {"127.0.0.1", "localhost", lan_ip}
-            return remote_allowed and host_allowed and (not origin or origin == f"http://{host}")
+        def allowed(self, write=False):
+            return report_access_allowed(self.client_address[0], self.headers.get("Host", ""),
+                                         self.headers.get("Origin"), port, hosts, lan_network, allow_all, write)
         def image_headers(self, status, source_info, length=None, download_name=None, cache_state=None, content_type="image/jpeg"):
             self.send_response(status)
             self.send_header("Content-Type", content_type)
@@ -564,6 +595,8 @@ def serve(job, port, lan_ip=None, prefix=24):
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(data)))
                 self.send_header("Cache-Control", "private, max-age=300" if result["status"] == "ready" else "no-store")
+                if result["status"] == "error" and result.get("retryAfterSeconds"):
+                    self.send_header("Retry-After", str(max(1, int(result["retryAfterSeconds"]))))
                 self.send_header("Cross-Origin-Resource-Policy", "same-origin")
                 self.send_header("X-Content-Type-Options", "nosniff")
                 self.end_headers()
@@ -676,8 +709,7 @@ def serve(job, port, lan_ip=None, prefix=24):
             except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError) as error:
                 print(f"Report client disconnected: {type(error).__name__}", file=sys.stderr)
         def do_POST(self):
-            host = self.headers.get("Host", "").split(":")[0].lower()
-            if self.client_address[0] != "127.0.0.1" or host not in {"127.0.0.1", "localhost"} or not self.allowed() or self.path != "/cancel":
+            if not self.allowed(write=True) or self.path != "/cancel":
                 self.send_error(403)
                 return
             (job / "cancel.request").write_text("requested", encoding="ascii")
@@ -686,9 +718,11 @@ def serve(job, port, lan_ip=None, prefix=24):
     class ReportServer(ThreadingHTTPServer):
         request_queue_size = 64
         daemon_threads = True
-    addresses = ["127.0.0.1"] + ([lan_ip] if lan_ip else [])
+    addresses = ["0.0.0.0"] if allow_all else ["127.0.0.1"] + ([lan_ip] if lan_ip else [])
     servers = [ReportServer((address, port), Handler) for address in addresses]
-    for address in addresses:
+    if allow_all:
+        print("REPORT_LISTEN 0.0.0.0; all source IPv4 clients may read registered private photos/originals; no authentication", flush=True)
+    for address in ["127.0.0.1"] + ([lan_ip] if lan_ip else []):
         print(f"REPORT_READY http://{address}:{port}/", flush=True)
     for server in servers[1:]:
         threading.Thread(target=server.serve_forever, daemon=True).start()
@@ -710,6 +744,8 @@ if __name__ == "__main__":
     parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--lan-ip", help="Explicit physical-interface RFC1918 IPv4; default stays loopback-only")
     parser.add_argument("--lan-prefix", type=int, default=24)
+    parser.add_argument("--allow-all", action="store_true", help="Opt-in all-source read access on 0.0.0.0; private originals become reachable; POST stays loopback")
+    parser.add_argument("--allowed-host", action="append", default=[], help="Additional exact local hostname/IPv4 accepted in Host")
     args = parser.parse_args()
     if args.operation == "init":
         initialize(args.source)
@@ -726,4 +762,4 @@ if __name__ == "__main__":
         finally:
             lock.unlink(missing_ok=True)
     else:
-        serve(args.job.resolve(strict=True), args.port, args.lan_ip, args.lan_prefix)
+        serve(args.job.resolve(strict=True), args.port, args.lan_ip, args.lan_prefix, args.allow_all, args.allowed_host)

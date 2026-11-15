@@ -7,7 +7,7 @@
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'">
   <title>BirdShot · 优选鸟体</title>
   <style>
-    :root{font:14px/1.6 "Segoe UI","Microsoft YaHei",sans-serif;color:#e5e9e1;background:#151a17;color-scheme:dark;--muted:#a6b0a5;--border:#364137;--accent:#d1e4a0}
+    :root{font:14px/1.6 "Segoe UI","Microsoft YaHei",sans-serif;color:#e5e9e1;background:#151a17;color-scheme:dark;--muted:#a6b0a5;--border:#364137;--accent:#d1e4a0;--candidate-rgb:96 165 250;--candidate-ink:#b7d8ff}
     *{box-sizing:border-box}[hidden]{display:none!important}body{margin:0}button,input,select{font:inherit}button,a,input,select{outline-offset:4px}button,select,input{color:inherit;background:#232c25;border:1px solid #485548;border-radius:7px;padding:8px 11px}button{cursor:pointer}button:disabled{opacity:.45;cursor:default}a{color:var(--accent);text-underline-offset:3px}h1,h2,h3,p{margin:0}h1{font-size:23px;font-weight:650}h2{font-size:20px}h3{font-size:15px}small,.muted{color:var(--muted);font-size:12px}
     header{border-bottom:1px solid var(--border);padding:17px max(24px,4vw);display:flex;align-items:center;gap:20px;flex-wrap:wrap}header .brand{font-weight:750;letter-spacing:1px;color:var(--accent)}header h1{margin-right:auto}.header-tools{display:flex;gap:15px;align-items:center;font-size:12px}.status{border:1px solid #536449;color:var(--accent);border-radius:20px;padding:3px 10px;font-size:12px}
     main{max-width:1800px;margin:auto;padding:17px max(24px,4vw) 35px}.progress-row{display:flex;gap:15px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--muted)}progress{height:5px;width:160px;accent-color:var(--accent)}#counts{margin-left:auto;color:#c7d1c1}#change-counts{margin-top:5px;color:var(--muted);font-size:11px}
@@ -15,7 +15,8 @@
     .results-line{display:flex;justify-content:space-between;gap:15px;margin-bottom:12px;color:var(--muted);font-size:12px}.gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:19px}.tile{min-width:0;background:#202821;border:1px solid #354135;border-radius:10px;overflow:hidden}.tile-open{display:block;width:100%;padding:0;text-align:left;background:transparent;border:0;border-radius:0;height:100%}.tile-open:hover{background:#293329}.tile-open:focus-visible{outline:2px solid var(--accent);outline-offset:-3px}.thumb{position:relative;background:#0e1310;aspect-ratio:4/3;display:grid;place-items:center;overflow:hidden}.thumb img{width:100%;height:100%;object-fit:contain;position:absolute;inset:0}.image-error{color:#d8b8a2;font-size:12px;text-align:center;padding:12px}.tile-info{padding:12px 14px 14px}.tile-heading{display:flex;align-items:start;gap:8px;justify-content:space-between}.species{font-size:16px;font-weight:650;overflow-wrap:anywhere}.rank{color:var(--accent);font-size:12px;white-space:nowrap}.badges{display:flex;gap:7px;flex-wrap:wrap;margin:7px 0}.badge{display:inline-block;border:1px solid #50603e;background:#303e27;color:#d0e1ad;font-size:11px;border-radius:4px;padding:1px 6px}.badge.review{border-color:#6e6043;color:#e4c891;background:#3a3326}.badge.nonbird{border-color:#6d4f4b;color:#e4b7ac;background:#392a28}.reason{font-size:12px;color:#c7cfc2;overflow-wrap:anywhere}.clamp{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.source{font-size:11px;color:var(--muted);margin-top:9px;overflow-wrap:anywhere}
     .notice{border:1px solid #566348;background:#252e21;border-radius:8px;padding:12px 15px;margin:12px 0}.notice.error{border-color:#885e4e;background:#392a23;color:#f1cbb6}.notice p{margin:4px 0}.empty{padding:65px 20px;text-align:center;border:1px dashed #465242;border-radius:10px;background:#1b221c}.empty h2{margin-bottom:8px}.pager{display:flex;gap:14px;align-items:center;justify-content:center;margin:25px 0 12px}.pager span{font-size:12px;color:var(--muted)}footer{font-size:11px;color:var(--muted);border-top:1px solid var(--border);padding-top:15px;margin-top:22px;display:flex;gap:15px;justify-content:space-between;flex-wrap:wrap}
     .species-candidates{display:grid;gap:7px;margin:9px 0}.species-candidate{font-size:12px;overflow-wrap:anywhere}.species-candidate strong{font-weight:600}.scientific,.classification-score{display:block;color:var(--muted);font-size:11px}.classification-note{color:var(--muted);font-size:10px}.details-copy>h3:not(:first-child){margin-top:17px}
-    .compact-classification .species-candidates{gap:4px;margin:6px 0}.compact-classification .scientific{display:inline;margin-left:6px;font-size:10px}.compact-classification .classification-score{font-size:10px;line-height:1.4}
+    .compact-classification{width:calc(100% + var(--tile-pad) + var(--tile-pad));align-self:stretch;margin-inline:calc(-1 * var(--tile-pad));min-width:0}.compact-classification .species-candidates{width:100%;align-self:stretch;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;margin:8px 0}.compact-classification .species-candidate{display:flex;flex-direction:column;min-width:0;padding:5px;border:0;border-radius:3px;background:linear-gradient(#ffffff05,#ffffff00),rgb(var(--candidate-rgb) / var(--candidate-alpha));box-shadow:inset 0 1px #ffffff0a,0 1px 1px #0002;line-height:1.4;text-align:center}.compact-classification strong{display:block;min-height:2.8em;font-size:11px}.compact-classification .classification-score{font-size:10px;line-height:1.4;margin-top:auto;padding-top:5px;color:var(--candidate-ink)}
+    .tile-open{display:flex;flex-direction:column}.tile-open>.thumb{width:100%;flex-shrink:0}.tile-info{--tile-pad:14px;flex:1;display:flex;flex-direction:column;width:100%;padding-inline:var(--tile-pad)}.tile-info>.capture-summary{margin-top:auto;padding-top:10px}
     dialog{border:1px solid #53634c;background:#1b231d;color:inherit;border-radius:12px;width:min(1440px,96vw);max-height:94vh;padding:0}dialog::backdrop{background:#050a07d9}.dialog-header{position:sticky;top:0;z-index:2;background:#1b231df5;display:flex;align-items:center;gap:15px;justify-content:space-between;padding:15px 20px;border-bottom:1px solid var(--border)}.dialog-header h2{font-size:17px;overflow-wrap:anywhere}#detail{padding:20px}.detail-layout{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(260px,1fr);gap:22px}.preview-area{background:#101612;position:relative;min-height:180px;display:flex;align-items:center;justify-content:center}.crop-wrap{position:relative;line-height:0;max-width:100%}.crop-wrap img{display:block;max-width:100%;max-height:61vh;width:auto;height:auto}.crop-wrap svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}.viewer-tools{display:flex;gap:15px;align-items:center;flex-wrap:wrap;margin:10px 0}.details-copy{min-width:0}.details-copy p{margin:9px 0}.details-copy dl,.candidate dl{font-size:12px;margin:12px 0}.metric-row{display:flex;gap:12px;justify-content:space-between;border-top:1px solid #344034;padding:5px 0}.metric-row dt{color:var(--muted)}.metric-row dd{margin:0;text-align:right;overflow-wrap:anywhere}.detail-links{display:flex;gap:15px;flex-wrap:wrap;margin-top:12px;font-size:12px}.candidate-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(225px,1fr));gap:13px;margin-top:12px}.candidate{border:1px solid #43503e;background:#252e25;border-radius:9px;padding:10px;min-width:0}.candidate.focused{border-color:var(--accent)}.candidate .thumb{aspect-ratio:4/3;border-radius:5px}.candidate button{width:100%;padding:0;background:transparent;border:0;text-align:left}.candidate h3{margin-top:8px;overflow-wrap:anywhere}.candidate p{margin-top:7px;font-size:12px;overflow-wrap:anywhere}.candidate-section{margin-top:24px;padding-top:18px;border-top:1px solid var(--border)}.frame-empty{margin-top:12px;padding:12px;border:1px dashed #58634b;border-radius:7px}.model-copy{white-space:pre-wrap;overflow-wrap:anywhere}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
     @media(min-width:1550px){.gallery{grid-template-columns:repeat(5,minmax(0,1fr))}}
     @media(max-width:850px){.detail-layout{grid-template-columns:1fr}.toolbar{align-items:center}.tabs{width:100%}.crop-wrap img{max-height:53vh}.header-tools{gap:10px}#counts{margin-left:0}.gallery{grid-template-columns:repeat(auto-fill,minmax(210px,1fr))}}
@@ -24,9 +25,9 @@
     button,select,input[type="search"],summary{min-height:44px}button,input,select,a,summary{touch-action:manipulation}.check{min-height:44px}.tabs button{flex:1}
     .header-tools a,.detail-links a,footer a{display:inline-flex;align-items:center;min-height:44px}
     .progress-row span{min-width:0;overflow-wrap:anywhere}
-    .capture-summary,.capture-details{overflow-wrap:anywhere}.capture-summary{margin-top:9px;color:var(--muted);font-size:11px}.capture-details{margin-top:17px;border-top:1px solid var(--border);padding-top:12px}.capture-details a{display:inline-flex;align-items:center;min-height:44px}.capture-details .metric-row>*{min-width:0}
+    .capture-summary,.capture-details{overflow-wrap:anywhere}.capture-summary{display:grid;grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);gap:10px;margin-top:10px;color:var(--muted);font-size:11px}.capture-time,.capture-place{min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.capture-place{text-align:right}.capture-details{margin-top:17px;border-top:1px solid var(--border);padding-top:12px}.capture-details a{display:inline-flex;align-items:center;min-height:44px}.capture-details .metric-row>*{min-width:0}
     .shoot-filter{display:flex;align-items:center;flex-wrap:wrap;gap:8px 16px;margin-top:15px}.shoot-field{width:300px;max-width:100%;min-width:0}.shoot-field select{width:100%;min-width:0;text-overflow:ellipsis}#shoot-group-status{flex:1;min-width:200px;font-size:12px;color:var(--muted);overflow-wrap:anywhere}.shoot-group-label{color:var(--accent);overflow-wrap:anywhere}
-    .english-name{display:block;color:var(--muted);font-size:12px;overflow-wrap:anywhere}.dialog-header h2{flex:1;min-width:0}.dialog-actions{display:flex;align-items:center;gap:10px;margin-left:auto}.primary-action{display:inline-flex;align-items:center;justify-content:center;min-height:44px;background:var(--accent);color:#22301b;border-radius:7px;padding:8px 16px;font-weight:650;text-decoration:none;white-space:nowrap}.technical-details{margin-top:20px}.switch-control{display:inline-flex;align-items:center;gap:9px;min-height:44px;cursor:pointer;font-size:12px}.switch-control input{appearance:none;display:block;width:42px;height:24px;padding:0;border:1px solid #6b796b;background:#354137;border-radius:14px;position:relative;flex-shrink:0;cursor:inherit}.switch-control input::after{content:"";position:absolute;left:3px;top:3px;width:16px;height:16px;border-radius:50%;background:#c9d1c5;transition:transform .15s}.switch-control input:checked{background:#a6c76d;border-color:#a6c76d}.switch-control input:checked::after{background:#1b2c14;transform:translateX(18px)}.switch-control input:focus-visible{outline:2px solid var(--accent);outline-offset:4px}.switch-control:has(input:disabled){opacity:.45;cursor:default}
+    .english-name{display:block;color:var(--muted);font-size:12px;overflow-wrap:anywhere}.dialog-header h2{flex:1;min-width:0}.dialog-actions{display:flex;align-items:center;gap:10px;margin-left:auto}.primary-action{display:inline-flex;align-items:center;justify-content:center;min-height:44px;background:var(--accent);color:#22301b;border-radius:7px;padding:8px 16px;font-weight:650;text-decoration:none;white-space:nowrap}.technical-details{margin-top:20px}
     .original-toggle{position:absolute;right:10px;bottom:10px;z-index:1;display:flex;align-items:center;gap:6px;min-width:44px;min-height:44px;background:#172218e8;border-color:#b9cb9f;color:#e5efda;box-shadow:0 2px 8px #0007}.original-toggle[aria-pressed="true"]{background:var(--accent);color:#22301b}.original-toggle svg{width:19px;height:19px}.preview-status{font-size:12px;color:var(--muted);padding:7px 0;overflow-wrap:anywhere}.preview-status[role="alert"]{color:#efbca4}.crop-wrap img{cursor:zoom-in}
     dialog.photo-viewer{inset:0;width:100%;height:100%;width:100dvw;height:100dvh;max-width:none;max-height:none;margin:0;border:0;border-radius:0;background:#080b09;overflow:hidden;padding:0;touch-action:none}.photo-stage{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;overflow:hidden;touch-action:none}.photo-stage img{display:block;max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;transform-origin:center;cursor:zoom-out;will-change:transform}.photo-toolbar{position:absolute;top:calc(env(safe-area-inset-top) + 10px);right:calc(env(safe-area-inset-right) + 12px);z-index:2;display:flex;gap:8px}.photo-hint{position:absolute;bottom:calc(env(safe-area-inset-bottom) + 14px);left:20px;right:20px;text-align:center;color:#e0e8d8;font-size:12px;pointer-events:none;text-shadow:0 1px 5px #000}
     .photo-message{position:absolute;bottom:calc(env(safe-area-inset-bottom) + 52px);left:16px;right:16px;z-index:2;text-align:center;pointer-events:none;font-size:12px;color:#e0e8d8;text-shadow:0 1px 5px #000}.photo-message button{pointer-events:auto}.photo-message [role="alert"]{color:#ffd0b6}
@@ -35,10 +36,12 @@
     html:has(dialog[open]){overflow:hidden}.crop-wrap img{max-height:55dvh}
     details{border:1px solid var(--border);border-radius:7px;margin:9px 0;padding:0 10px}summary{cursor:pointer;padding:10px 0;color:var(--accent);font-size:12px}
     dialog{border:0;background:#171e19}.dialog-header{display:grid;grid-template-columns:minmax(0,1fr) 44px;gap:8px;border:0;background:#171e19ee;backdrop-filter:blur(14px);padding:10px 16px}.dialog-heading{min-width:0}.dialog-header h2{font-size:17px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.dialog-source{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.icon-button{width:44px;height:44px;padding:10px;border:0;background:transparent;color:#d4ded0;border-radius:50%}.icon-button:hover{background:#d1e4a014}.icon-button svg{width:24px;height:24px;display:block}
-    .image-controls{position:absolute;bottom:10px;right:10px;left:10px;z-index:1;display:flex;justify-content:flex-end;align-items:center;gap:6px;pointer-events:none}.image-controls>*{pointer-events:auto}.image-controls .original-toggle{position:static;box-shadow:none}.image-controls .original-toggle,.image-controls .switch-control{min-height:44px;margin:0;padding:7px 9px;border:1px solid #e0efcf26;border-radius:22px;background:#111b13b8;backdrop-filter:blur(10px);color:#e5efda;font-size:11px;gap:5px;line-height:1.2}.image-controls .switch-control:has(input:checked),.image-controls .original-toggle[aria-pressed="true"]{background:#bedb88e8;color:#213118;border-color:#d1e4a080}.image-controls .switch-control input{width:27px;height:16px;border:0;background:#e1ecd84d}.image-controls .switch-control input::after{width:12px;height:12px;left:2px;top:2px;background:#dce7d4}.image-controls .switch-control input:checked{background:#28451a80}.image-controls .switch-control input:checked::after{transform:translateX(11px);background:#203917}.image-controls .switch-control:has(input:disabled){opacity:.5}.preview-area{isolation:isolate}
-    .classification-details .species-candidates{grid-template-columns:repeat(3,minmax(0,1fr));gap:7px;align-items:start}.classification-details .species-candidate{min-width:0;padding:6px;border:1px solid rgb(184 214 141 / var(--candidate-border));border-radius:10px;background:rgb(166 199 109 / var(--candidate-alpha))}.classification-details .species-candidate strong{display:block;font-size:12px;line-height:1.45;margin-top:7px}.classification-details .english-name{font-size:10px;line-height:1.35;margin-top:3px}.classification-details .classification-score{font-size:13px;font-weight:650;color:#d9edb7;margin-top:7px}.reference-picture{position:relative;display:grid;place-items:center;aspect-ratio:1;background:#101912;border-radius:6px;overflow:hidden;color:var(--muted);font-size:10px;text-align:center}.reference-picture img{width:100%;height:100%;object-fit:contain;position:absolute;inset:0}.reference-placeholder{padding:9px}.reference-label{position:absolute;top:3px;left:3px;padding:1px 4px;background:#101a12ba;color:#d6e2ce;border-radius:3px;font-size:9px;pointer-events:none}.reference-links{font-size:10px;margin-top:4px;line-height:1.4}.reference-links>a{display:flex;align-items:center;min-height:44px}.reference-credit{margin:0;border:0;border-top:1px solid #b8d68d24;padding:0}.reference-credit summary{font-size:10px;padding:8px 0;min-height:36px;color:#c4d2bb}.reference-credit p,.reference-credit a{font-size:10px;overflow-wrap:anywhere}.reference-retry{font-size:10px;padding:4px 6px;width:100%;margin-top:5px}.reference-note{font-size:10px;color:var(--muted)}
-    @media(max-width:480px){.dialog-header{padding:8px 12px}.dialog-header h2{font-size:16px}.image-controls{bottom:8px;right:8px;left:8px;gap:5px}.image-controls .original-toggle,.image-controls .switch-control{padding:7px 8px}.classification-details .species-candidates{gap:6px}.classification-details .species-candidate{padding:5px}}
-    @media(prefers-reduced-motion:reduce){.switch-control input::after{transition:none}}
+    .image-controls{position:absolute;bottom:10px;right:10px;left:10px;z-index:1;display:flex;justify-content:flex-end;align-items:center;gap:6px;pointer-events:none}.image-controls>*{pointer-events:auto}.image-controls .original-toggle{position:static;box-shadow:none}.image-controls button{min-height:44px;margin:0;padding:7px 9px;border:1px solid #e0efcf30;border-radius:22px;background:#111b1352;backdrop-filter:blur(3px);color:#eef5e5;text-shadow:-1px 0 1px #000c,1px 0 1px #000c,0 1px 2px #000;font-size:11px;gap:5px;line-height:1.2}.image-controls button[aria-pressed="true"]{background:#bedb8866;color:#e1ff9f;border-color:#d1e4a099}.image-controls svg{filter:drop-shadow(0 1px 1px #000c)}.preview-area{isolation:isolate}
+    .classification-details .species-candidates{grid-template-columns:repeat(3,minmax(0,1fr));gap:7px;align-items:stretch}.classification-details .species-candidate{display:flex;flex-direction:column;min-width:0;padding:6px;border:1px solid rgb(184 214 141 / var(--candidate-border));border-radius:10px;background:rgb(166 199 109 / var(--candidate-alpha))}.classification-details .species-candidate strong{display:block;font-size:12px;line-height:1.45;min-height:2.9em;margin-top:7px}.classification-details .english-name{font-size:10px;line-height:1.35;min-height:4.05em;margin-top:3px}.classification-details .classification-score{font-size:13px;font-weight:650;color:#d9edb7;margin-top:auto;padding-top:7px}.reference-picture{position:relative;display:grid;place-items:center;aspect-ratio:1;flex-shrink:0;background:#101912;border-radius:6px;overflow:hidden;color:var(--muted);font-size:10px;text-align:center}.reference-picture img{width:100%;height:100%;object-fit:contain;position:absolute;inset:0}.reference-placeholder{padding:9px}.reference-label{position:absolute;top:3px;left:3px;padding:1px 4px;background:#101a12ba;color:#d6e2ce;border-radius:3px;font-size:9px;pointer-events:none}.reference-links{flex-shrink:0;font-size:10px;margin-top:6px;line-height:1.4}.reference-article,.reference-retry{display:flex;align-items:center;justify-content:center;min-height:44px;width:100%;padding:5px;border:1px solid #c1d9a333;border-radius:6px;background:#c1d9a30a;font-size:11px;text-align:center;text-decoration:none}.reference-article[aria-disabled=true]{color:var(--muted);border-color:#c1d9a31a}.reference-sources{border:0;padding:0;margin:6px 0}.reference-sources summary{font-size:10px;color:var(--muted)}.reference-source{font-size:10px;overflow-wrap:anywhere;border-top:1px solid var(--border);padding:8px 0}.reference-source p{font-size:10px;margin:3px 0}
+    .classification-details .species-candidate{--card-pad:6px;padding:var(--card-pad)}.classification-details .classification-score{margin-top:0;padding-bottom:6px}.reference-links{align-self:stretch;margin:auto calc(-1 * var(--card-pad)) calc(-1 * var(--card-pad));border-top:1px solid #c1d9a333;border-radius:0 0 9px 9px;overflow:hidden}.reference-article,.reference-retry{border:0;border-radius:0;background:transparent}.reference-article[href]:hover,.reference-retry:hover{background:#d1e4a00d}.reference-article:focus-visible,.reference-retry:focus-visible{outline:2px solid var(--accent);outline-offset:-3px}
+    .classification-details .species-candidate{background:rgb(var(--candidate-rgb) / var(--candidate-alpha));border-color:rgb(var(--candidate-rgb) / var(--candidate-border))}.classification-details .classification-score,.classification-details .reference-article{color:var(--candidate-ink)}.reference-links{border-top-color:rgb(var(--candidate-rgb) / .22)}.reference-article[href]:hover,.reference-retry:hover{background:rgb(var(--candidate-rgb) / .07)}.reference-article:focus-visible,.reference-retry:focus-visible{outline-color:rgb(var(--candidate-rgb))}.reference-picture{background:#191511}.reference-label{background:#21170fba;color:#f0dfc8}.species-candidate.probability-unknown{background:#c8c3bb08;border-color:#b8b2a433}.probability-unknown .classification-score,.classification-details .reference-article[aria-disabled=true]{color:var(--muted)}
+    .compact-classification strong{min-height:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.compact-classification .classification-score{white-space:nowrap}.classification-details .species-candidate strong,.classification-details .english-name{min-height:0}.reference-picture{background:#131820}.reference-label{background:#101a28ba;color:#d9e8fc}.reference-feedback:empty{display:none}.reference-feedback p{font-size:11px}.reference-refresh{font-size:11px;min-height:44px}
+    @media(max-width:480px){.dialog-header{padding:8px 12px}.dialog-header h2{font-size:16px}.image-controls{bottom:8px;right:8px;left:8px;gap:5px}.image-controls button{padding:7px 8px}.classification-details .species-candidates{gap:6px}.classification-details .species-candidate{--card-pad:5px}}
   </style>
 </head>
 <body>
@@ -68,7 +71,7 @@
     <section id="gallery" class="gallery" role="tabpanel" aria-labelledby="preferred-tab" aria-busy="true"></section>
     <section id="empty" class="empty" hidden><h2 id="empty-title"></h2><p id="empty-message" class="muted"></p></section>
     <nav id="pager" class="pager" aria-label="图墙分页" hidden><button id="previous" type="button">上一页</button><span id="page-label" aria-live="polite"></span><button id="next" type="button">下一页</button><label class="field"><span class="sr-only">每页数量</span><select id="page-size" aria-label="每页数量"><option value="24">24 项 / 页</option><option value="48" selected>48 项 / 页</option><option value="96">96 项 / 页</option></select></label></nav>
-    <footer>照片仅从当前本地报告服务读取，原图按需打开。</footer>
+    <footer id="privacy-note">照片仅从当前本地报告服务读取，原图按需打开。</footer>
   </main>
   <dialog id="dialog" aria-labelledby="dialog-title">
     <div class="dialog-header"><div class="dialog-heading"><h2 id="dialog-title">鸟体裁剪与组内对比</h2><p id="dialog-source" class="dialog-source"></p></div><button id="close" class="icon-button" type="button" aria-label="关闭" title="关闭详情" autofocus><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
@@ -123,7 +126,7 @@
     };
     function classificationScores(candidate) {
       return number(candidate.probability) && candidate.probability >= 0 && candidate.probability <= 1 ?
-        '概率 ' + (candidate.probability * 100).toLocaleString('zh-CN', { maximumSignificantDigits: 4 }) + '%' : '概率未提供';
+        '概率 ' + (candidate.probability * 100).toFixed(1) + '%' : '概率未提供';
     }
     function captureTime(capture, compact) {
       if (!hasName(capture.time)) return { text: '未记录拍摄时间', zone: '' };
@@ -137,11 +140,13 @@
       if (offset) {
         const instant = new Date(year + '-' + month + '-' + day + 'T' + hour + ':' + minute + ':' + (second || '00') + offset);
         if (!Number.isFinite(instant.getTime())) return { text: '拍摄时间格式无效', zone: '' };
-        const options = { timeZone: 'Asia/Shanghai', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' };
+        const options = { timeZone: 'Asia/Shanghai', year: 'numeric', month: compact ? '2-digit' : 'long', day: compact ? '2-digit' : 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' };
         if (!compact && second) options.second = '2-digit';
-        return { text: new Intl.DateTimeFormat('zh-CN', options).format(instant), zone: '北京时间' };
+        const formatter = new Intl.DateTimeFormat('zh-CN', options);
+        const values = Object.fromEntries(formatter.formatToParts(instant).map(part => [part.type, part.value]));
+        return { text: compact ? values.year + '/' + values.month + '/' + values.day + ' ' + values.hour + ':' + values.minute : formatter.format(instant), zone: '北京时间' };
       }
-      return { text: Number(year) + '年' + Number(month) + '月' + Number(day) + '日 ' + hour + ':' + minute + (!compact && second ? ':' + second : ''), zone: '相机时间，时区未记录' };
+      return { text: compact ? year + '/' + month + '/' + day + ' ' + hour + ':' + minute : Number(year) + '年' + Number(month) + '月' + Number(day) + '日 ' + hour + ':' + minute + (second ? ':' + second : ''), zone: '相机时间，时区未记录' };
     }
     function validLocation(location) {
       return location?.crs === 'WGS84' && location.source === 'exif-gps' &&
@@ -154,7 +159,21 @@
         (location.longitude < 0 ? '西经 ' : '东经 ') + degrees(location.longitude);
     }
     function captureDetails(capture, compact = false, shootGroup) {
-      const section = el('section', compact ? 'capture-summary' : 'capture-details');
+      const section = el(compact ? 'div' : 'section', compact ? 'capture-summary' : 'capture-details');
+      if (compact) {
+        const ready = capture?.status === 'ready', time = ready ? captureTime(capture, true) : null;
+        const note = !capture || capture.status === 'pending' ? '拍摄元数据尚未读取' : capture.status === 'error' ? '拍摄元数据读取失败' : !ready ? '拍摄元数据状态无效' : '';
+        const timeKnown = time && /^\d{4}\/\d{2}\/\d{2} \d{2}:\d{2}$/.test(time.text);
+        const timeText = timeKnown ? time.text : '时间未知';
+        const place = ready && hasName(capture.placeName) ? capture.placeName : ready && validLocation(capture.location) ? '已记录位置' : '未知地点';
+        const timeNode = el('span', 'capture-time', timeText), placeNode = el('span', 'capture-place', place);
+        timeNode.title = note || (time ? time.text + (time.zone ? '（' + time.zone + '）' : '') : '时间未知');
+        placeNode.title = note || (ready && capture.location && !validLocation(capture.location) ? '位置数据无效或非 EXIF WGS84；详情待核实' : place);
+        timeNode.setAttribute('aria-label', '拍摄时间：' + timeNode.title);
+        placeNode.setAttribute('aria-label', '地点：' + placeNode.title);
+        section.append(timeNode, placeNode);
+        return section;
+      }
       if (!compact) section.append(el('h3', '', '拍摄时间与地点'));
       if (hasName(shootGroup?.name)) section.append(el('p', 'shoot-group-label', '拍摄组：' + shootGroup.name));
       if (!capture || capture.status === 'pending') {
@@ -174,11 +193,6 @@
       const location = capture.location === null || capture.location === undefined ? '未记录位置' :
         validLocation(capture.location) ? locationText(capture.location) : '位置数据无效或非 EXIF WGS84；不生成地图定位';
       const place = hasName(capture.placeName) ? capture.placeName : hasName(shootGroup?.placeName) ? shootGroup.placeName : '未知地点';
-      if (compact) {
-        section.append(el('p', '', '拍摄：' + time.text + (time.zone ? '（' + time.zone + '）' : '')), el('p', '', '地点：' + place));
-        if (place === '未知地点' || capture.location) section.append(el('p', '', location));
-        return section;
-      }
       const list = el('dl');
       addMetric(list, '拍摄时间', time.text);
       if (time.zone) addMetric(list, '时间说明', time.zone);
@@ -244,6 +258,7 @@
     }
     async function json(url, signal) {
       const response = await fetch(url, { cache: 'no-store', credentials: 'same-origin', signal, redirect: 'error' });
+      if (response.headers.get('X-BirdShot-Access-Mode') === 'all-sources-read-only') $('privacy-note').textContent = '当前已开放所有来源的只读浏览，未认证；可达设备可查看照片、原图及登记元数据。';
       if (!response.ok) throw new Error(url + ' 读取失败（HTTP ' + response.status + '）');
       try { return await response.json(); }
       catch (error) { throw new Error(url + ' 不是有效 JSON：' + error.message); }
@@ -450,35 +465,70 @@
       if (!candidates.length) section.append(el('p', 'muted', '鸟种未知；没有可展示的有效鸟种候选。'));
       const list = el('div', 'species-candidates');
       const references = new Map();
-      const ordered = compact ? candidates : [...candidates].sort((a, b) => (number(b.probability) ? b.probability : -1) - (number(a.probability) ? a.probability : -1));
+      const sources = el('details', 'reference-sources'), sourceList = el('div', 'reference-source-list'), feedback = el('div', 'reference-feedback');
+      sources.hidden = true;
+      sources.append(el('summary', '', '图片来源'), sourceList);
+      const updateSources = () => {
+        sourceList.replaceChildren();
+        for (const reference of references.values()) {
+          if (!reference.credit) continue;
+          const credit = reference.credit, entry = el('div', 'reference-source');
+          entry.append(el('strong', '', reference.name + ' · ' + (credit.provider || 'Wikimedia Commons')), el('p', '', credit.author), externalLink(credit.license, credit.licenseUrl),
+            document.createTextNode(' · '), externalLink('原始图页', credit.sourceUrl),
+            el('p', '', '缩小至最长480像素、JPEG重编码、去EXIF；仅为物种参考，非本次分类确认。'));
+          sourceList.append(entry);
+        }
+        sources.hidden = !sourceList.childElementCount;
+        feedback.replaceChildren();
+        for (const reference of references.values()) {
+          clearTimeout(reference.retryTimer);
+          if (!reference.notice) continue;
+          const note = el('p', 'muted', reference.name + '：' + reference.notice);
+          const retry = el('button', 'reference-refresh', '重试资料'); retry.type = 'button';
+          retry.disabled = Date.now() < reference.retryAt;
+          if (retry.disabled) reference.retryTimer = setTimeout(() => { if (section.isConnected && !signal.aborted) retry.disabled = false; }, Math.min(2147483647, reference.retryAt - Date.now() + 50));
+          retry.addEventListener('click', () => {
+            if (Date.now() < reference.retryAt) return;
+            reference.notice = null; updateSources(); loadReferences(reference, section, signal);
+          });
+          feedback.append(note, retry);
+        }
+      };
+      const ordered = [...candidates].sort((a, b) => (number(b.probability) ? b.probability : -1) - (number(a.probability) ? a.probability : -1));
       for (const [index, candidate] of ordered.entries()) {
         const row = el('div', 'species-candidate');
+        const validProbability = number(candidate.probability) && candidate.probability >= 0 && candidate.probability <= 1;
+        row.classList.toggle('probability-unknown', !validProbability);
+        row.style.setProperty('--candidate-alpha', String(validProbability ? .035 + .24 * candidate.probability : .03));
+        row.style.setProperty('--candidate-border', String(validProbability ? .14 + .36 * candidate.probability : .18));
         if (!compact) {
-          const probability = number(candidate.probability) ? Math.max(0, Math.min(1, candidate.probability)) : 0;
-          row.style.setProperty('--candidate-alpha', String(.06 + .3 * probability));
-          row.style.setProperty('--candidate-border', String(.18 + .5 * probability));
           const picture = el('div', 'reference-picture'), links = el('div', 'reference-links');
           picture.append(el('span', 'reference-placeholder', candidate.isBird === false ? '非鸟候选' : '参考图加载中'), el('span', 'reference-label', '参考图'));
+          const waiting = el('span', 'reference-article', '百科待加载'); waiting.setAttribute('aria-disabled', 'true'); links.append(waiting);
           row.append(picture);
           row.append(links);
           const name = candidate.scientificName?.trim();
           if (candidate.isBird !== false && hasName(name)) {
             const key = name.toLowerCase();
-            if (!references.has(key)) references.set(key, { name, targets: [] });
+            if (!references.has(key)) references.set(key, { name, targets: [], credit: null, updateSources });
             references.get(key).targets.push({ picture, links, candidate });
-          } else picture.querySelector('.reference-placeholder').textContent = '暂无参考图';
+          } else { picture.querySelector('.reference-placeholder').textContent = '暂无参考图'; waiting.textContent = '百科暂缺'; }
         }
         if (candidate.isBird === false) {
-          row.append(el('strong', 'badge nonbird', (index + 1) + '. 非鸟类别'));
+          row.append(el('strong', 'badge nonbird', (compact ? '' : (index + 1) + '. ') + '非鸟类别'));
         } else {
-          row.append(el('strong', '', (index + 1) + '. ' + (hasName(candidate.commonName) ? candidate.commonName : '中文名待补')));
+          const label = el('strong', '', (compact ? '' : (index + 1) + '. ') + (hasName(candidate.commonName) ? candidate.commonName : '中文名待补'));
+          label.title = hasName(candidate.commonName) ? candidate.commonName : '中文名待补';
+          row.append(label);
         }
-        row.append(el('span', 'english-name', hasName(candidate.englishName) ? candidate.englishName : '英文名待补'));
+        if (!compact) row.append(el('span', 'english-name', hasName(candidate.englishName) ? candidate.englishName : '英文名待补'));
         row.append(el('span', 'classification-score', classificationScores(candidate)));
         if (!compact) row.append(row.querySelector('.reference-links'));
         list.append(row);
       }
       section.append(list);
+      if (!compact) section.append(feedback, sources);
+      signal?.addEventListener('abort', () => { for (const reference of references.values()) clearTimeout(reference.retryTimer); }, { once: true });
       if (!compact && signal) for (const reference of references.values()) loadReferences(reference, section, signal);
       return section;
     }
@@ -487,18 +537,32 @@
       if (url.protocol !== 'https:' || !hosts.includes(url.hostname) || url.username || url.password || (url.port && url.port !== '443')) throw new Error('公开参考链接来源无效');
       return url.href;
     }
+    function chineseArticle(article, name) {
+      if (article?.language === 'zh') {
+        const url = new URL(publicReferenceUrl(article.url, ['zh.wikipedia.org']));
+        if (url.pathname.startsWith('/wiki/') || url.pathname === '/w/index.php' && url.searchParams.has('search') && [...url.searchParams.keys()].every(key => key === 'search')) {
+          return { ...article, url: url.href, kind: article.kind === 'search' || url.pathname === '/w/index.php' ? 'search' : 'article' };
+        }
+        throw new Error('中文百科路径无效');
+      }
+      return { title: name, language: 'zh', kind: 'search', url: 'https://zh.wikipedia.org/w/index.php?search=' + encodeURIComponent(name) };
+    }
     async function loadReferences(reference, section, signal) {
       const valid = () => !signal.aborted && section.isConnected;
       try {
         const response = await fetch('/species-reference?scientificName=' + encodeURIComponent(reference.name), { signal, credentials: 'same-origin' });
         const result = await response.json();
         if (!valid()) return;
-        if (!response.ok || result.status === 'error') throw new Error(result.message || '公开参考资料暂不可用');
-        if (result.scientificName?.toLowerCase() !== reference.name.toLowerCase() || !['ready', 'notFound'].includes(result.status)) throw new Error('公开参考物种不匹配');
-        const articleUrl = result.article ? publicReferenceUrl(result.article.url, ['zh.wikipedia.org', 'en.wikipedia.org']) : null;
+        if (!response.ok && result.status !== 'error') throw new Error(result.message || '公开参考资料暂不可用');
+        if (result.scientificName?.toLowerCase() !== reference.name.toLowerCase() || !['ready', 'notFound', 'error'].includes(result.status)) throw new Error('公开参考物种不匹配');
+        const article = chineseArticle(result.article, reference.name), articleUrl = article.url;
+        reference.notice = result.status === 'error' ? result.message + (result.stale ? '；暂用已核实的旧资料' : '') + '（约' + Math.ceil(result.retryAfterSeconds || 30) + '秒后可重试）' : null;
+        reference.retryAt = Date.now() + Math.max(1000, (result.retryAfterSeconds || 30) * 1000);
+        reference.updateSources();
         const image = result.image;
         if (image && (!/^\/species-media\/[a-f0-9]{64}\.jpg$/.test(image.url) || !hasName(image.author) || !hasName(image.license))) throw new Error('参考图登记或署名缺失');
-        const sourceUrl = image ? publicReferenceUrl(image.sourceUrl, ['commons.wikimedia.org']) : null;
+        const sourceUrl = image ? publicReferenceUrl(image.sourceUrl, ['commons.wikimedia.org', 'www.inaturalist.org', 'inaturalist.org']) : null;
+        if (sourceUrl && new URL(sourceUrl).hostname.endsWith('inaturalist.org') && !/^\/photos\/\d+$/.test(new URL(sourceUrl).pathname)) throw new Error('备源照片出处路径无效');
         const licenseUrl = image ? publicReferenceUrl(image.licenseUrl, ['creativecommons.org', 'commons.wikimedia.org']) : null;
         for (const target of reference.targets) {
           const { picture, links, candidate } = target;
@@ -507,33 +571,33 @@
             const img = el('img');
             img.alt = (candidate.commonName || candidate.englishName || '物种') + ' · 公开参考图';
             img.decoding = 'async';
-            img.addEventListener('error', () => { img.remove(); picture.prepend(el('span', 'reference-placeholder', '参考图加载失败')); }, { once: true });
+            img.addEventListener('load', () => { if (valid()) { reference.credit = { ...image, sourceUrl, licenseUrl }; reference.updateSources(); } }, { once: true });
+            img.addEventListener('error', () => {
+              img.remove(); picture.prepend(el('span', 'reference-placeholder', '参考图加载失败'));
+              reference.credit = null; reference.updateSources();
+            }, { once: true });
             img.src = image.url;
             picture.append(img);
-          } else picture.append(el('span', 'reference-placeholder', result.status === 'notFound' ? '暂无准确条目' : '暂无授权参考图'));
-          picture.append(el('span', 'reference-label', '参考图'));
+          } else picture.append(el('span', 'reference-placeholder', result.status === 'error' ? ({ upstreamBusy: '公开资料繁忙', timeout: '参考图连接超时' })[result.reasonCode] || '参考资料暂不可用' : result.status === 'notFound' ? '暂无准确条目' : '暂无授权参考图'));
+          picture.append(el('span', 'reference-label', result.stale ? '旧参考图' : '参考图'));
           links.replaceChildren();
           if (articleUrl) {
-            const link = externalLink('百科 ↗', articleUrl);
-            link.title = result.article.title;
-            link.setAttribute('aria-label', (candidate.commonName || candidate.englishName || '候选鸟种') + ' · ' + result.article.title + '百科');
+            const link = externalLink(article.kind === 'search' ? '中文百科搜索 ↗' : '中文百科 ↗', articleUrl);
+            link.className = 'reference-article';
+            link.title = article.title;
+            link.setAttribute('aria-label', (candidate.commonName || candidate.englishName || '候选鸟种') + ' · ' + (article.kind === 'search' ? '中文百科搜索' : article.title + '中文百科'));
             links.append(link);
-          } else links.append(el('span', 'reference-note', '百科条目暂缺'));
-          if (image) {
-            const credit = el('details', 'reference-credit');
-            credit.append(el('summary', '', '署名许可'), el('p', '', image.author), externalLink(image.license, licenseUrl), document.createTextNode(' · '), externalLink('原始图页', sourceUrl), el('p', '', '缩略、JPEG重编码；仅为物种参考，非本次分类确认。'));
-            links.append(credit);
-          }
+          } else { const absent = el('span', 'reference-article', '百科暂缺'); absent.setAttribute('aria-disabled', 'true'); links.append(absent); }
         }
       } catch (error) {
         if (!valid()) return;
         console.warn('公开物种参考暂不可用', reference.name, error.message);
+        reference.notice = '本地参考接口或网络连接失败；约30秒后可重试'; reference.retryAt = Date.now() + 30000;
+        reference.updateSources();
         for (const { picture, links } of reference.targets) {
           picture.replaceChildren(el('span', 'reference-placeholder', '参考资料暂不可用'), el('span', 'reference-label', '参考图'));
-          const retry = el('button', 'reference-retry', '稍后重试');
-          retry.type = 'button';
-          retry.addEventListener('click', () => { retry.disabled = true; loadReferences(reference, section, signal); });
-          links.replaceChildren(retry);
+          const search = externalLink('中文百科搜索 ↗', chineseArticle(null, reference.name).url); search.className = 'reference-article';
+          links.replaceChildren(search);
         }
       }
     }
@@ -607,6 +671,7 @@
       photo.x = Math.max(-maxX, Math.min(maxX, photo.x));
       photo.y = Math.max(-maxY, Math.min(maxY, photo.y));
       photo.image.style.transform = 'translate3d(' + photo.x + 'px,' + photo.y + 'px,0) scale(' + photo.scale + ')';
+      photo.preview.notify();
     }
     function openPhoto(preview) {
       if (state.preview !== preview || preview.loading || !preview.current || performance.now() < state.ignorePreviewClickUntil || $('photo-viewer').open) return;
@@ -614,7 +679,7 @@
       $('photo-stage').replaceChildren(preview.current);
       $('photo-viewer').showModal();
       const geometry = sizePreviewImage(preview, preview.current, preview.mode, true);
-      state.photo.maxScale = preview.mode === 'original' && geometry ? Math.min(8, Math.max(1, geometry.sourceWidth / geometry.width)) : 8;
+      state.photo.maxScale = preview.mode === 'original' && geometry ? Math.max(1, geometry.sourceWidth / geometry.width) : 8;
       $('photo-download').hidden = !/^p\d{6}$/.test(preview.frame.id);
       if (!$('photo-download').hidden) $('photo-download').href = '/original/' + encodeURIComponent(preview.frame.id) + '?download=1';
       transformPhoto();
@@ -678,13 +743,13 @@
       path.setAttribute('d', 'M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5M8 16l4-5 4 5');
       path.setAttribute('fill', 'none'); path.setAttribute('stroke', 'currentColor'); path.setAttribute('stroke-width', '1.8'); icon.append(path);
       const modeLabel = el('span', '', '全图'); toggle.append(icon, modeLabel);
-      const maskLabel = el('label', 'switch-control'), mask = el('input'); mask.type = 'checkbox'; mask.setAttribute('role', 'switch'); maskLabel.append(mask, document.createTextNode('分割轮廓'));
-      const poseLabel = el('label', 'switch-control'), pose = el('input'); pose.type = 'checkbox'; pose.setAttribute('role', 'switch'); poseLabel.append(pose, document.createTextNode('姿态点'));
+      const mask = el('button', 'overlay-toggle', '分割轮廓'), pose = el('button', 'overlay-toggle', '姿态点');
+      for (const button of [mask, pose]) { button.type = 'button'; button.setAttribute('aria-pressed', 'false'); button.setAttribute('aria-label', button.textContent); }
       const retry = el('button', '', '重试清晰预览'); retry.type = 'button'; retry.hidden = true;
       const preview = { frame, bird, area, wrap, svg, toggle, mode: 'crop', targetMode: 'crop', current: null, loading: false, images: new Map(), sequence: 0, pending: null, timer: null, failedUrl: null };
       state.preview = preview;
       const renderOverlay = () => {
-        const valid = !preview.loading && drawOverlay(svg, bird, mask.checked, pose.checked, frame, preview.mode === 'original');
+        const valid = !preview.loading && drawOverlay(svg, bird, mask.getAttribute('aria-pressed') === 'true', pose.getAttribute('aria-pressed') === 'true', frame, preview.mode === 'original');
         mask.disabled = !valid || !bird.mask?.path;
         pose.disabled = !valid || !bird.posePoints?.length;
         if (!valid) svg.replaceChildren();
@@ -692,11 +757,20 @@
       };
       const validFrame = /^p\d{6}$/.test(frame.id) && number(frame.width) && frame.width > 0 && number(frame.height) && frame.height > 0;
       if (!validFrame) toggle.title = '缺少原图尺寸或照片标识，无法选择清晰预览';
-      const loadedText = () => preview.mode === 'crop' ? '鸟体裁剪 · 点击图片放大' :
-        preview.images.get('original')?.native ? '完整画面 · 原文件分辨率' : '完整画面 · ' + format(preview.images.get('original')?.edge) + 'px 预览';
+      const loadedText = () => {
+        if (preview.mode === 'crop') return '鸟体裁剪 · 点击图片放大';
+        const entry = preview.images.get('original'), image = preview.current;
+        const native = entry?.native && entry.image === image && image?.complete && !image.hidden &&
+          image.naturalWidth === frame.width && image.naturalHeight === frame.height &&
+          new URL(image.currentSrc || image.src).pathname === '/original/' + frame.id;
+        if (native) return '原文件已加载 · ' + image.naturalWidth + ' × ' + image.naturalHeight;
+        return '完整画面 · ' + format(image ? Math.max(image.naturalWidth, image.naturalHeight) : entry?.edge) + 'px 预览' +
+          (image?.naturalWidth === frame.width && image?.naturalHeight === frame.height ? ' · 预览已到源像素尺寸，非原文件' : '');
+      };
       preview.notify = () => {
         if (state.photo?.preview !== preview) return;
-        $('photo-status').textContent = status.textContent;
+        const photo = state.photo;
+        $('photo-status').textContent = status.textContent + (photo.scale >= photo.maxScale - .001 ? ' · 已到最大缩放倍率' : '');
         $('photo-status').setAttribute('role', status.getAttribute('role') || 'status');
         $('photo-retry').hidden = retry.hidden;
       };
@@ -752,12 +826,12 @@
         const entry = { image, ...choice };
         preview.pending = entry;
         image.hidden = true; wrap.insertBefore(image, svg);
-        const failed = () => {
-          if (state.preview !== preview || sequence !== preview.sequence) return;
-          image.remove(); preview.pending = null; preview.loading = false; preview.failedUrl = choice.url;
+        const failed = message => {
+          if (state.preview !== preview || sequence !== preview.sequence || preview.pending?.image !== image) return;
+          image.removeAttribute('src'); image.remove(); preview.pending = null; preview.loading = false; preview.failedUrl = choice.url;
           area.setAttribute('aria-busy', 'false'); toggle.disabled = !validFrame; renderOverlay();
           status.setAttribute('role', 'alert'); retry.hidden = false;
-          status.textContent = mode === 'crop' ? '裁剪读取失败，未自动加载原图。' :
+          status.textContent = typeof message === 'string' ? message + '；仍显示已加载预览，可重试。' : mode === 'crop' ? '裁剪读取失败，未自动加载原图。' : choice.native ? '原文件加载失败，仍显示已加载预览；可重试。' :
             preview.mode === 'original' ? '清晰预览升级失败，仍显示已加载预览；可重试。' : preview.current ? '完整画面预览读取失败，仍显示裁剪；可重试。' : '完整画面预览读取失败，尚无可显示图像；可重试。';
           if (preview.mode !== 'original') preview.targetMode = 'crop';
           preview.notify();
@@ -765,7 +839,13 @@
         image.addEventListener('load', async () => {
           try { await image.decode(); }
           catch { failed(); return; }
-          if (state.preview === preview && sequence === preview.sequence) { preview.failedUrl = null; commit(entry, mode); }
+          if (state.preview === preview && sequence === preview.sequence) {
+            if (choice.native && (image.naturalWidth !== frame.width || image.naturalHeight !== frame.height)) {
+              failed('原文件解码尺寸与已登记照片不一致'); return;
+            }
+            if (mode === 'original') entry.edge = Math.max(image.naturalWidth, image.naturalHeight);
+            preview.failedUrl = null; commit(entry, mode);
+          }
         }, { once: true });
         image.addEventListener('error', failed, { once: true });
         image.addEventListener('click', () => openPhoto(preview));
@@ -783,10 +863,11 @@
         const scale = photo?.scale || 1, sourceEdge = Math.max(frame.width, frame.height), dpr = devicePixelRatio || 1;
         let need = Math.min(sourceEdge, Math.ceil(Math.max(geometry.width, geometry.height) * scale * (scale > 1 ? dpr : Math.min(dpr, 2))));
         if (scale === 1) need = Math.min(need, 1920);
-        const tier = [960, 1920, 3840].find(edge => edge >= need);
+        const requireNative = scale > 1 && (need >= sourceEdge || photo && scale >= photo.maxScale - .001);
+        const tier = requireNative ? undefined : [960, 1920, 3840].find(edge => edge >= need);
         const choice = { url: tier ? '/preview/' + encodeURIComponent(frame.id) + '/' + tier + '.jpg' : '/original/' + encodeURIComponent(frame.id), edge: Math.min(tier || sourceEdge, sourceEdge), native: !tier };
         const loaded = preview.images.get('original');
-        if (loaded && (loaded.edge >= choice.edge || (!force && need <= loaded.edge * 1.12))) {
+        if (loaded && (!choice.native || loaded.native) && (loaded.edge >= choice.edge || (!force && need <= loaded.edge * 1.12))) {
           if (preview.pending) preview.cancel();
           if (preview.mode !== 'original') commit(loaded, 'original');
           return;
@@ -799,7 +880,7 @@
         if (preview.current) {
           const photo = state.photo?.preview === preview ? state.photo : null;
           const geometry = sizePreviewImage(preview, preview.current, preview.mode, !!photo);
-          if (photo && geometry && preview.mode === 'original') photo.maxScale = Math.min(8, Math.max(1, geometry.sourceWidth / geometry.width));
+          if (photo && geometry && preview.mode === 'original') photo.maxScale = Math.max(1, geometry.sourceWidth / geometry.width);
         }
         preview.schedule();
       };
@@ -816,9 +897,12 @@
         else load('crop', { url: media(metadata.item?.crop || bird.crop), edge: 0 });
       });
       preview.retry = () => retry.click();
-      mask.addEventListener('change', renderOverlay); pose.addEventListener('change', renderOverlay);
+      for (const button of [mask, pose]) button.addEventListener('click', () => {
+        button.setAttribute('aria-pressed', String(button.getAttribute('aria-pressed') !== 'true'));
+        renderOverlay();
+      });
       status.setAttribute('aria-live', 'polite'); wrap.append(svg);
-      const tools = el('div', 'image-controls'); tools.append(maskLabel, poseLabel, toggle);
+      const tools = el('div', 'image-controls'); tools.append(mask, pose, toggle);
       tools.addEventListener('click', event => event.stopPropagation());
       tools.addEventListener('pointerdown', event => event.stopPropagation());
       area.append(wrap, tools);

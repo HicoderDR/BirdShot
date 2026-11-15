@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Exact-taxon public references. Only scientific names are sent to Wikimedia."""
 import hashlib
+from email.utils import parsedate_to_datetime
 from html.parser import HTMLParser
 import io
 import json
@@ -23,11 +24,45 @@ CACHE_BUDGET = 128 * 1024 * 1024
 USER_AGENT = "BirdShot-local-reference/1.0 (public species references; https://github.com/HicoderDR/BirdShot)"
 API_HOSTS = {"www.wikidata.org", "commons.wikimedia.org"}
 IMAGE_HOSTS = {"upload.wikimedia.org", "thumb.wikimedia.org"}
+INAT_IMAGE_HOSTS = {"inaturalist-open-data.s3.amazonaws.com", "static.inaturalist.org"}
 LOG = logging.getLogger("birdshot.species-reference")
 
 
 class ReferenceError(RuntimeError):
-    pass
+    def __init__(self, message, reason_code=None, retry_after=30):
+        super().__init__(message)
+        self.reason_code = reason_code or ("upstreamBusy" if "maxlag" in message else "timeout" if "timeout" in message.lower() else "networkError")
+        self.retry_after = retry_after
+        self.partial = None
+
+
+def retry_seconds(value, default=30):
+    if not value:
+        return default
+    try:
+        return max(1, int(value))
+    except ValueError:
+        try:
+            return max(1, int(parsedate_to_datetime(value).timestamp() - time.time()))
+        except (ValueError, TypeError, OverflowError):
+            return default
+
+
+def chinese_entry(result, name):
+    result = dict(result)
+    article = result.get("article")
+    if article and article.get("language") == "zh":
+        result["article"] = {**article, "kind": article.get("kind", "article")}
+    else:
+        if article:
+            result["sourceArticle"] = article
+        result["article"] = {"title": name, "language": "zh", "kind": "search",
+                             "url": "https://zh.wikipedia.org/w/index.php?search=" + urllib.parse.quote(name, safe="")}
+    if result["status"] == "error":
+        reason = result.get("reasonCode") or ("upstreamBusy" if "maxlag" in result.get("errorType", "") else "networkError")
+        result["reasonCode"] = reason
+        result["message"] = {"upstreamBusy": "Wikimedia繁忙，请按提示稍后重试", "timeout": "公开资料连接超时，请稍后重试"}.get(reason, "公开资料网络暂不可用，请稍后重试")
+    return result
 
 
 class PlainText(HTMLParser):
@@ -70,7 +105,7 @@ class RestrictedRedirect(urllib.request.HTTPRedirectHandler):
         return redirected
 
 
-def fetch(url, hosts, limit, image=False):
+def fetch(url, hosts, limit, image=False, with_headers=False):
     official_url(url, hosts)
     opener = urllib.request.build_opener(RestrictedRedirect(hosts))
     request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT, "Accept": "image/*" if image else "application/json"})
@@ -86,21 +121,29 @@ def fetch(url, hosts, limit, image=False):
             data = response.read(limit + 1)
             if len(data) > limit:
                 raise ReferenceError("Public reference response exceeds the size limit")
-            return data
+            return (data, response.headers) if with_headers else data
+    except urllib.error.HTTPError as error:
+        busy = error.code in {429, 503}
+        raise ReferenceError(f"Public reference HTTP {error.code}", "upstreamBusy" if busy else "upstreamHttpError",
+                             retry_seconds(error.headers.get("Retry-After"))) from error
     except (urllib.error.URLError, socket.timeout, TimeoutError, OSError, ValueError) as error:
-        raise ReferenceError(f"Public reference connection failed: {type(error).__name__}") from error
+        timeout = isinstance(error, (socket.timeout, TimeoutError)) or isinstance(getattr(error, "reason", None), (socket.timeout, TimeoutError))
+        raise ReferenceError(f"Public reference connection failed: {type(error).__name__}", "timeout" if timeout else "networkError") from error
 
 
 def api(host, parameters):
     url = "https://" + host + "/w/api.php?" + urllib.parse.urlencode({**parameters, "format": "json", "maxlag": 30})
     try:
-        result = json.loads(fetch(url, API_HOSTS, 4 * 1024 * 1024))
+        payload, headers = fetch(url, API_HOSTS, 4 * 1024 * 1024, with_headers=True)
+        result = json.loads(payload)
     except (ValueError, UnicodeError) as error:
         raise ReferenceError("Public reference API returned invalid JSON") from error
     if not isinstance(result, dict):
         raise ReferenceError("Public reference API returned an invalid object")
     if result.get("error"):
-        raise ReferenceError("Public reference API error: " + str(result["error"].get("code", "unknown"))[:80])
+        code = str(result["error"].get("code", "unknown"))[:80]
+        raise ReferenceError("Public reference API error: " + code, "upstreamBusy" if code in {"maxlag", "ratelimited", "readonly"} else "upstreamApiError",
+                             retry_seconds(headers.get("Retry-After")))
     return result
 
 
@@ -139,6 +182,40 @@ def permitted_license(metadata):
     return None
 
 
+def exact_inat(name, rows):
+    matches = [row for row in rows if row.get("name", "").casefold() == name.casefold()
+               and row.get("rank") == "species" and row.get("is_active") is True
+               and type(row.get("id")) is int and row["id"] > 0]
+    return matches[0] if len(matches) == 1 else None
+
+
+def inat_license(photo):
+    code = photo.get("license_code")
+    author = plain(photo.get("attribution"))
+    # iNaturalist app/models/shared/license_module.rb defines CC 4.0 and CC0 1.0.
+    licenses = {"cc-by": ("CC BY 4.0", "by/4.0/"), "cc-by-sa": ("CC BY-SA 4.0", "by-sa/4.0/"),
+                "cc0": ("CC0 1.0", "zero/1.0/")}
+    if code not in licenses or not author or photo.get("type") != "LocalPhoto":
+        return None
+    title, path = licenses[code]
+    return {"license": title, "licenseCode": code, "licenseUrl": "https://creativecommons.org/" +
+            ("publicdomain/" if code == "cc0" else "licenses/") + path, "author": author, "attribution": author}
+
+
+def inat_api(route, parameters=None):
+    if not re.fullmatch(r"taxa/(?:autocomplete|\d+)", route):
+        raise ReferenceError("Invalid public taxon route", "invalidResponse")
+    payload = fetch("https://api.inaturalist.org/v1/" + route + "?" + urllib.parse.urlencode(parameters or {}),
+                    {"api.inaturalist.org"}, 4 * 1024 * 1024)
+    try:
+        result = json.loads(payload)
+    except (ValueError, UnicodeError) as error:
+        raise ReferenceError("iNaturalist returned invalid JSON", "invalidResponse") from error
+    if not isinstance(result, dict) or not isinstance(result.get("results"), list):
+        raise ReferenceError("iNaturalist returned an invalid taxon response", "invalidResponse")
+    return result["results"]
+
+
 class SpeciesReferences:
     def __init__(self, job, allowed_names):
         self.root = Path(job) / "revisions" / "species-reference-cache-v1"
@@ -163,6 +240,7 @@ class SpeciesReferences:
         with self.guard:
             lock = self.locks.setdefault(key, threading.Lock())
         with lock:
+            cached = None
             if path.exists():
                 try:
                     cached = json.loads(path.read_text(encoding="utf-8"))
@@ -176,21 +254,36 @@ class SpeciesReferences:
                     except (FileNotFoundError, ValueError):
                         LOG.warning("Species image cache missing; refreshing exact taxon %s", name)
                 if cached["expiresAt"] > time.time() and available:
-                    return cached["result"]
+                    result = chinese_entry(cached["result"], name)
+                    if result["status"] == "error":
+                        result["retryAfterSeconds"] = max(1, int(cached["expiresAt"] - time.time()))
+                        result["retryAt"] = cached["expiresAt"]
+                    if cached.get("metadataVersion") != "zh-partial-backoff-v2":
+                        atomic(path, {**cached, "metadataVersion": "zh-partial-backoff-v2", "result": result})
+                    return result
             try:
                 if not self.network_slots.acquire(timeout=30):
                     raise ReferenceError("Public reference requests are busy")
                 try:
-                    result = self._lookup(name)
+                    result = self._lookup_with_backup(name)
                 finally:
                     self.network_slots.release()
+                result = chinese_entry(result, name)
                 ttl = 7 * 86400 if result["status"] == "ready" else 6 * 3600
+                failures = 0
             except ReferenceError as error:
                 LOG.warning("Species reference unavailable for %s: %s", name, error)
-                result = {"status": "error", "scientificName": name, "article": None, "image": None,
-                          "message": "公开参考资料暂不可用，请稍后重试", "errorType": str(error)}
-                ttl = 30
-            atomic(path, {"version": VERSION, "expiresAt": time.time() + ttl, "fetchedAt": time.time(), "result": result})
+                previous = cached["result"] if cached and cached["result"].get("entityId") else None
+                partial = error.partial or previous or {}
+                failures = min(5, (cached or {}).get("failures", 0) + 1)
+                ttl = max(error.retry_after, min(300, 30 * 2 ** (failures - 1)))
+                result = chinese_entry({**partial, "status": "error", "scientificName": name,
+                                       "article": partial.get("article"), "image": partial.get("image"),
+                                       "message": None, "reasonCode": error.reason_code, "errorType": str(error),
+                                       "partial": bool(partial), "stale": bool(previous and not error.partial),
+                                       "retryAfterSeconds": ttl, "retryAt": time.time() + ttl}, name)
+            atomic(path, {"version": VERSION, "metadataVersion": "zh-partial-backoff-v2", "failures": failures,
+                          "expiresAt": time.time() + ttl, "fetchedAt": time.time(), "result": result})
             return result
 
     def media(self, filename):
@@ -219,7 +312,7 @@ class SpeciesReferences:
 
     def _lookup(self, name):
         result = {"status": "notFound", "scientificName": name, "article": None, "image": None,
-                  "message": "未找到唯一且学名精确匹配的物种条目"}
+                  "reasonCode": "noExactTaxon", "message": "未找到唯一且学名精确匹配的物种条目"}
         search = api("www.wikidata.org", {"action": "wbsearchentities", "search": name, "language": "en", "type": "item", "limit": 5})
         ids = [row["id"] for row in search.get("search", []) if re.fullmatch(r"Q\d+", row.get("id", ""))]
         if not ids:
@@ -229,7 +322,7 @@ class SpeciesReferences:
         entity = exact_entity(name, list(data.get("entities", {}).values()))
         if entity is None:
             return result
-        result.update(status="ready", message=None, entityId=entity["id"],
+        result.update(status="ready", message=None, reasonCode=None, entityId=entity["id"],
                       verifiedScientificName=name, entityRevision=entity.get("lastrevid"),
                       entityUrl="https://www.wikidata.org/wiki/" + entity["id"])
         for language in ["zh", "en"]:
@@ -240,14 +333,77 @@ class SpeciesReferences:
             official_url(url, {"zh.wikipedia.org", "en.wikipedia.org"})
             result["article"] = {"title": plain(link["title"]), "url": url, "language": language}
             break
+        try:
+            result["image"] = self._lookup_image(name, entity)
+        except ReferenceError as error:
+            error.partial = result
+            raise
+        if result["image"] is None:
+            result.update(reasonCode="noLicensedImage", message="精确物种已核对；暂无许可与尺寸均合适的小型参考图")
+        return chinese_entry(result, name)
+
+    def _lookup_with_backup(self, name):
+        primary_error = None
+        try:
+            result = self._lookup(name)
+        except ReferenceError as error:
+            primary_error = error
+            result = error.partial or {"scientificName": name, "article": None, "image": None}
+        if result.get("image"):
+            return result
+        try:
+            image = self._inat_image(name)
+        except ReferenceError as error:
+            LOG.warning("iNaturalist backup unavailable for %s: %s", name, error)
+            if primary_error:
+                raise primary_error from error
+            error.partial = result
+            raise
+        if image:
+            return {**result, "status": "ready", "scientificName": name, "image": image,
+                    "verifiedScientificName": name, "reasonCode": "fallbackImage",
+                    "sourceWarning": primary_error.reason_code if primary_error else result.get("reasonCode"),
+                    "message": "参考图来自精确物种匹配的iNaturalist授权备源；百科仍为中文词条或明确搜索"}
+        if primary_error:
+            raise primary_error
+        return result
+
+    def _inat_image(self, name):
+        taxon = exact_inat(name, inat_api("taxa/autocomplete", {"q": name, "per_page": 3}))
+        if taxon is None:
+            return None
+        taxon = exact_inat(name, inat_api("taxa/" + str(taxon["id"])))
+        if taxon is None:
+            return None
+        for row in taxon.get("taxon_photos", [])[:20]:
+            if row.get("taxon_id") != taxon["id"] or row.get("taxon", {}).get("name", "").casefold() != name.casefold():
+                continue
+            photo = row.get("photo", {})
+            attribution = inat_license(photo)
+            if not attribution or not isinstance(photo.get("id"), int) or not photo.get("medium_url"):
+                continue
+            remote = official_url(photo["medium_url"], INAT_IMAGE_HOSTS)
+            source_url = "https://www.inaturalist.org/photos/" + str(photo["id"])
+            metadata = {"provider": "iNaturalist", "taxonId": taxon["id"], "photoId": photo["id"],
+                        "scientificName": name, "verifiedScientificName": name, "sourceUrl": source_url, **attribution}
+            identity = {key: value for key, value in metadata.items() if key != "attribution"}
+            key = hashlib.sha256(json.dumps([VERSION, identity, remote], sort_keys=True).encode()).hexdigest()
+            path = self._cache_remote(key, remote, INAT_IMAGE_HOSTS, metadata)
+            return {"url": "/species-media/" + path.name, **metadata}
+        return None
+
+    def _lookup_image(self, name, entity):
         for filename in claims(entity, "P18")[:3]:
             if not isinstance(filename, str) or len(filename) > 500:
                 continue
             data = api("commons.wikimedia.org", {"action": "query", "titles": "File:" + filename, "redirects": 1,
-                      "prop": "imageinfo", "iiprop": "url|extmetadata|sha1", "iiurlwidth": 480})
+                      "prop": "imageinfo", "iiprop": "url|extmetadata|sha1", "iiurlwidth": 480, "iiurlheight": 480})
             pages = list(data.get("query", {}).get("pages", {}).values())
             info = next((row["imageinfo"][0] for row in pages if row.get("imageinfo")), None)
             if not info or not info.get("thumburl"):
+                continue
+            dimensions = [info.get("thumbwidth"), info.get("thumbheight")]
+            if not all(isinstance(value, int) and value > 0 for value in dimensions) or max(dimensions) > 640:
                 continue
             attribution = permitted_license(info.get("extmetadata", {}))
             if not attribution:
@@ -256,34 +412,41 @@ class SpeciesReferences:
             remote = official_url(info["thumburl"], IMAGE_HOSTS)
             image_key = hashlib.sha256(json.dumps([VERSION, entity["id"], filename, info.get("sha1"), attribution],
                                                   ensure_ascii=False, sort_keys=True).encode()).hexdigest()
-            image_path = self.root / (image_key + ".jpg")
-            registration = self.root / (image_key + ".image.json")
-            if not image_path.exists() or not registration.exists():
-                payload = fetch(remote, IMAGE_HOSTS, 3 * 1024 * 1024, image=True)
-                try:
-                    with Image.open(io.BytesIO(payload)) as source:
-                        if source.format not in {"JPEG", "PNG", "WEBP"} or source.width * source.height > 16_000_000:
-                            raise ReferenceError("Unsupported public thumbnail dimensions/format")
-                        image = ImageOps.exif_transpose(source)
-                        image.thumbnail((480, 480), Image.Resampling.LANCZOS)
-                        if image.mode in {"RGBA", "LA", "P"}:
-                            rgba = image.convert("RGBA")
-                            image = Image.new("RGB", rgba.size, "white")
-                            image.paste(rgba, mask=rgba.getchannel("A"))
-                        elif image.mode != "RGB":
-                            image = image.convert("RGB")
-                        output = io.BytesIO()
-                        image.save(output, "JPEG", quality=88, exif=b"", icc_profile=source.info.get("icc_profile"))
-                    temporary = image_path.with_suffix(".part")
-                    temporary.write_bytes(output.getvalue())
-                    temporary.replace(image_path)
-                except (OSError, ValueError, Image.DecompressionBombError) as error:
-                    raise ReferenceError("Public thumbnail could not be safely decoded") from error
-                atomic(registration, {"entityId": entity["id"], "scientificName": name, "file": filename,
-                                     "sourceUrl": source_url, "commonsSha1": info.get("sha1"), **attribution,
-                                     "changes": "缩小至最长480像素，JPEG重编码，去EXIF；透明背景合成白色"})
-                self.prune(image_path)
-            result["image"] = {"url": "/species-media/" + image_path.name, "sourceUrl": source_url, **attribution}
-            return result
-        result["message"] = "精确物种条目已核对；暂未找到许可信息完整的可用参考图"
-        return result
+            image_path = self._cache_remote(image_key, remote, IMAGE_HOSTS,
+                {"provider": "Wikimedia Commons", "entityId": entity["id"], "scientificName": name, "file": filename,
+                 "sourceUrl": source_url, "commonsSha1": info.get("sha1"), **attribution}, dimensions)
+            return {"url": "/species-media/" + image_path.name, "sourceUrl": source_url, **attribution}
+        return None
+
+    def _cache_remote(self, key, remote, hosts, metadata, declared=None):
+        path, registration = self.root / (key + ".jpg"), self.root / (key + ".image.json")
+        if path.exists() and registration.exists():
+            return path
+        payload = fetch(remote, hosts, 3 * 1024 * 1024, image=True)
+        try:
+            with Image.open(io.BytesIO(payload)) as source:
+                if source.format not in {"JPEG", "PNG", "WEBP"} or max(source.size) > 640:
+                    raise ReferenceError("Public thumbnail is larger than the allowed small tier", "thumbnailSize")
+                downloaded_size = list(source.size)
+                image = ImageOps.exif_transpose(source)
+                image.thumbnail((480, 480), Image.Resampling.LANCZOS)
+                if image.mode in {"RGBA", "LA", "P"}:
+                    rgba = image.convert("RGBA")
+                    image = Image.new("RGB", rgba.size, "white")
+                    image.paste(rgba, mask=rgba.getchannel("A"))
+                elif image.mode != "RGB":
+                    image = image.convert("RGB")
+                output = io.BytesIO()
+                image.save(output, "JPEG", quality=88, exif=b"",
+                           icc_profile=source.info.get("icc_profile") if source.mode in {"RGB", "RGBA", "P"} else None)
+            temporary = path.with_suffix(".part")
+            temporary.write_bytes(output.getvalue())
+            temporary.replace(path)
+        except (OSError, ValueError, Image.DecompressionBombError) as error:
+            raise ReferenceError("Public thumbnail could not be safely decoded", "thumbnailDecode") from error
+        atomic(registration, {**metadata, "remoteThumbnailUrl": remote, "declaredDimensions": declared,
+                             "downloadedDimensions": downloaded_size, "downloadedBytes": len(payload),
+                             "localDimensions": list(image.size), "localBytes": path.stat().st_size,
+                             "changes": "仅取官方约500像素小图；缩至最长480像素，JPEG重编码、去EXIF，透明背景合成白色"})
+        self.prune(path)
+        return path
