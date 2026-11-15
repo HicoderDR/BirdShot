@@ -83,6 +83,7 @@ export function updateTracks(
   currentTracks: BirdTrack[],
   detections: BirdDetection[],
   nextId: number,
+  minimumNewTrackConfidence = HIGH_CONFIDENCE,
 ): { tracks: BirdTrack[]; nextId: number } {
   const highConfidence = detections.filter((detection) => detection.score >= HIGH_CONFIDENCE)
   const lowConfidence = detections.filter((detection) => (
@@ -99,7 +100,11 @@ export function updateTracks(
     }))
     .filter((track) => track.missed <= MAX_MISSED_FRAMES)
 
-  const newTracks = firstPass.unmatchedDetections.map((detection) => ({
+  const newDetections = [
+    ...firstPass.unmatchedDetections,
+    ...secondPass.unmatchedDetections.filter((detection) => detection.score >= minimumNewTrackConfidence),
+  ]
+  const newTracks = newDetections.map((detection) => ({
     ...detection,
     id: nextId++,
     hits: 1,

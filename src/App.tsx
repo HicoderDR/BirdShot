@@ -455,6 +455,7 @@ function App() {
           <span className="brand-mark">B</span>
           <span>BirdShot <small>FIELD LAB</small></span>
         </a>
+        <a href="/cull" style={{ marginLeft: 'auto', fontSize: 13, color: 'inherit' }}>鸟类筛片 Demo ↗</a>
         <span className={`status ${status}`}>
           <i />
           {statusText}

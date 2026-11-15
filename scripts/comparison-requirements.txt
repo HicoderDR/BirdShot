@@ -1,0 +1,2 @@
+open_clip_torch==3.3.0
+birder==0.8.4

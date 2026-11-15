@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>BirdShot · 全目录裁剪与严格选片进度</title>
+  <style>
+    *{box-sizing:border-box}body{margin:0;color:#30402d;background:#f5f5ee;font:14px/1.7 "Segoe UI","Microsoft YaHei",sans-serif}
+    header{padding:18px 4%;background:#fffef7;border-bottom:1px solid #e0e6d5;display:flex;align-items:center;gap:18px}
+    header strong{font-size:21px}header span{color:#88987b;font-size:12px}header a{margin-left:auto}
+    main{max-width:1500px;margin:auto;padding:26px 4%}h1{font-size:30px;margin:0 0 6px}h2{font-size:17px;margin:0 0 12px}
+    a{color:#597c3e}button{font:inherit;color:inherit;background:#fffef7;border:1px solid #d6e0c9;padding:7px 12px;border-radius:6px;cursor:pointer}
+    .notice{background:#e9efdd;border:1px solid #dae4ca;border-radius:9px;padding:14px 17px;margin:16px 0;color:#758365;font-size:12px}
+    .stats{display:grid;grid-template-columns:repeat(7,1fr);gap:10px;margin:18px 0}.stat{background:#fffef7;border:1px solid #e1e7d7;border-radius:8px;padding:13px}
+    .stat b{display:block;font-size:24px;color:#547b3b}.stat span{font-size:11px;color:#8a987b}
+    .progress-line{display:flex;justify-content:space-between;gap:15px;font-size:12px;color:#7d8c6b}progress{width:100%;height:8px;accent-color:#799d50}
+    .layout{display:grid;grid-template-columns:330px minmax(0,1fr);gap:20px;margin-top:22px}.group-list{max-height:78vh;overflow:auto;padding:3px}
+    .group-card{display:flex;gap:10px;width:100%;text-align:left;padding:10px;margin-bottom:8px;align-items:center}
+    .group-card.active{border-color:#7a9b51;background:#eaf0de}.group-card img{width:90px;height:66px;object-fit:contain;background:#e5ebdb;border-radius:5px}
+    .group-card .empty{width:90px;height:66px;display:grid;place-items:center;background:#edf0e6;font-size:10px;color:#98a489;border-radius:5px}
+    .group-card b{display:block;font-size:12px}.group-card small{display:block;font-size:10px;color:#8b977c}
+    .detail{min-width:0;background:#fffef7;padding:20px;border:1px solid #e0e6d4;border-radius:10px}
+    .photo{border-top:1px solid #e3e9d9;padding-top:16px;margin-top:16px}.photo-title{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+    .tag{font-size:11px;border-radius:5px;padding:3px 8px;background:#f1e8d4;color:#978147}.tag.keep{background:#dfeccd;color:#527535}.tag.failed{background:#f7e1db;color:#9c5b47}
+    .reason{font-size:11px;color:#8b947e;margin:6px 0 12px}.birds{display:grid;grid-template-columns:repeat(auto-fill,minmax(220px,1fr));gap:12px}
+    .bird{border:1px solid #dfe7d4;border-radius:8px;padding:10px;background:#f8f9f2}.bird.selected{border-color:#7da450;background:#edf4e3}
+    .bird img{width:100%;height:160px;object-fit:contain;background:#e7eddc;border-radius:5px;cursor:pointer}.bird strong{font-size:12px}
+    .bird dl{margin:8px 0;font-size:10px}.bird dl div{display:flex;justify-content:space-between;gap:8px}.bird dt{color:#94a082}.bird dd{margin:0;color:#6b8054}
+    .muted{color:#99a389;font-size:11px}.tools{display:flex;gap:12px;align-items:center;flex-wrap:wrap}
+    .error{background:#f8e6df;color:#a2644c;padding:12px;border-radius:7px;font-size:12px;margin:10px 0}
+    dialog{border:1px solid #c9d9b5;border-radius:10px;max-width:94vw;max-height:92vh;padding:15px;background:#fffef7}dialog::backdrop{background:#0d1b14b8}
+    #viewer{max-width:88vw;max-height:76vh;object-fit:contain;display:block;margin:10px auto}.viewer-tools{display:flex;gap:14px;align-items:center}
+    .overlay-wrap{position:relative;line-height:0}.overlay-wrap svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}
+    #crop-metadata{font-size:11px;color:#859577;max-width:80vw;overflow-wrap:anywhere}
+    footer{margin-top:20px;padding-top:14px;border-top:1px solid #dce3d1;font-size:10px;color:#95a286}
+    @media(max-width:900px){.layout{grid-template-columns:1fr}.group-list{display:flex;overflow-x:auto;max-height:none;gap:8px}.group-card{min-width:240px;width:240px}.stats{grid-template-columns:repeat(4,1fr)}}
+    @media(max-width:500px){.stats{grid-template-columns:repeat(2,1fr)}.progress-line{display:block}.birds{grid-template-columns:1fr}header span{display:none}}
+  </style>
+</head>
+<body>
+  <header><strong>◈ BirdShot</strong><span>全目录裁剪 · 本机严格选片</span><a href="http://127.0.0.1:5173/cull" target="_blank">单组 Demo ↗</a></header>
+  <main>
+    <h1>逐组处理，保留每个判断的依据。</h1>
+    <p class="muted">只保存已识别鸟体的原像素裁剪；完整 JPEG / RAW 不复制、不移动、不修改。源图按需打开，页面默认只加载小裁剪。</p>
+    <div class="notice">严格策略：只有同一候选对象的充分可比主体指标支持时，才归档选中裁剪。主体纹理不是眼部合焦；眼区模型可能猜错，批处理不使用眼区自动选择。单张没有绝对阈值校准，证据不足列待审。多鸟正常，跨鸟匹配不清楚不混比。</div>
+    <div class="tools"><a href="/mapping.json" download>下载裁剪 → 原图追溯 JSON</a><a href="/manifest.json" download>完整输入清点</a><button id="pause">请求安全暂停</button><span id="inventory" class="muted"></span></div>
+    <div class="stats" id="stats"></div>
+    <div class="progress-line"><span id="phase">正在读取进度…</span><span id="status"></span></div>
+    <progress id="progress" value="0" max="1"></progress>
+    <div id="error" class="error" hidden></div>
+    <p id="output" class="muted"></p>
+    <div class="layout"><aside><h2>候选连续组</h2><div class="group-list" id="groups"></div></aside><section class="detail" id="detail"><p class="muted">首个组完成后即可浏览。未完成组明确显示等待 / 处理中，不假装已经选片。</p></section></div>
+    <footer>所有数据只在本机处理。检测 / 分割 / 姿态是模型预测，不是人工真值；噪声、压缩、曝光和姿态可干扰主体梯度。RAW 与 JPEG 按同目录同名关联，RAW 仅记录溯源，未独立解码。JSON 的裁剪坐标对应应用 EXIF 方向后的 JPEG 显示图；裁剪保持原像素尺寸，JPEG95 重编码，不是 RAW 替代。</footer>
+  </main>
+  <dialog id="dialog"><div class="viewer-tools"><strong id="viewer-title"></strong><button id="close">关闭</button></div><div class="overlay-wrap"><img id="viewer"><svg id="overlay"></svg></div><p id="crop-metadata"></p></dialog>
+  <script>
+    const $=id=>document.getElementById(id);
+    const create=(tag,cls,text)=>{const e=document.createElement(tag);if(cls)e.className=cls;if(text!==undefined)e.textContent=text;return e};
+    const media=path=>'/media/'+path.split('/').map(encodeURIComponent).join('/');
+    const label=d=>({keep:'保留技术候选',review:'待审',reject:'建议淘汰'})[d]||d;
+    let selectedGroup=null,loadedCompleted=null;
+    const groupElements=new Map(),latestGroups=new Map();
+    function alignOverlay(){const image=$('viewer'),svg=$('overlay');svg.style.left=image.offsetLeft+'px';svg.style.top=image.offsetTop+'px';svg.style.right='auto';svg.style.bottom='auto';svg.style.width=image.clientWidth+'px';svg.style.height=image.clientHeight+'px'}
+    async function json(url){const r=await fetch(url,{cache:'no-store'});if(!r.ok)throw new Error('读取失败：'+r.status);return r.json()}
+    function showCrop(frame,bird){
+      $('viewer-title').textContent=frame.source.primary.relative+' · 鸟 #'+bird.id;
+      $('viewer').src=media(bird.crop);
+      $('viewer').onload=alignOverlay;
+      const [x,y,w,h]=bird.cropRect;
+      const svg=$('overlay');svg.setAttribute('viewBox',[x,y,w,h].join(' '));svg.innerHTML='';
+      if(bird.mask?.path){const path=document.createElementNS('http://www.w3.org/2000/svg','path');path.setAttribute('d',bird.mask.path);path.setAttribute('fill','#c4ea76');path.setAttribute('fill-opacity','.12');path.setAttribute('stroke','#c4ea76');path.setAttribute('stroke-width',Math.max(1,w/240));path.setAttribute('fill-rule','evenodd');svg.append(path)}
+      for(const p of bird.posePoints||[]){if(p.confidence<.65)continue;const c=document.createElementNS('http://www.w3.org/2000/svg','circle');c.setAttribute('cx',p.x);c.setAttribute('cy',p.y);c.setAttribute('r',Math.max(2,w/100));c.setAttribute('fill','#ffb879');svg.append(c);const t=document.createElementNS('http://www.w3.org/2000/svg','text');t.setAttribute('x',p.x+w/70);t.setAttribute('y',p.y);t.setAttribute('font-size',Math.max(8,w/35));t.setAttribute('fill','#ffb879');t.setAttribute('stroke','#142315');t.setAttribute('stroke-width',Math.max(.4,w/700));t.setAttribute('paint-order','stroke');t.textContent=['喙','左眼候选','右眼候选','头顶','左肩部','右肩部'][p.index]+' '+Math.round(p.confidence*100)+'%';svg.append(t)}
+      $('crop-metadata').textContent='原像素裁剪 '+bird.cropRect.join(', ')+' · 候选姿态仅喙、左右眼、头顶、左右肩部，不画人体骨架；橙点不是眼睛可见性真值。对应原图 '+frame.source.primary.relative;
+      $('dialog').showModal();
+      requestAnimationFrame(alignOverlay);
+    }
+    async function showGroup(group){
+      selectedGroup=group.id;
+      for(const card of $('groups').children)card.classList.toggle('active',card.dataset.id===group.id);
+      $('detail').replaceChildren(create('h2','',`第 ${group.index} 组 · ${group.count} 张`));
+      $('detail').append(create('p','muted',group.grouping+' · '+(group.capturedAt||'拍摄时间未知')));
+      if(group.status!=='done'){$('detail').append(create('p','muted',group.status==='running'?'正在处理，本组结果尚未最终提交':'等待处理'));loadedCompleted=null;return}
+      try{
+        const result=await json('/group/'+group.id+'.json');loadedCompleted=group.id;
+        $('detail').append(create('p','muted','选中裁剪 '+result.selectedCrops.length+' · 其余照片与所有实例如下，可点击裁剪查看真实掩码与模型候选点。'));
+        for(const f of result.frames){
+          const photo=create('section','photo'),head=create('div','photo-title');head.append(create('strong','',f.source.primary.relative),create('span','tag '+(f.decision==='keep'?'keep':f.processingStatus==='failed'?'failed':''),f.processingStatus==='failed'?'失败':f.processingStatus==='unsupported'?'未支持 / 待审':label(f.decision)));
+          const original=create('a','','按需查看原图 ↗');original.href='/original/'+f.id;original.target='_blank';head.append(original);photo.append(head);
+          photo.append(create('p','reason',f.reason+' · 比较依据 '+(f.basis==='body'?'分割主体内部纹理（非眼部）':f.basis||'证据不足')+' · 可比 '+f.cohortSize+' 帧 · 相对 '+(f.relative===null?'未判定':Math.round(f.relative*100)+'%')));
+          const birds=create('div','birds');
+          for(const b of f.instances||[]){
+            const chosen=!!f.selectedCrop&&b.id===f.selectedInstance,card=create('div','bird '+(chosen?'selected':'')),image=create('img');image.src=media(b.thumbnail);image.alt=f.source.primary.relative+' 鸟 #'+b.id;image.loading='lazy';image.onclick=()=>showCrop(f,b);card.append(image,create('strong','',`鸟 #${b.id} · ${chosen?'已归档选中裁剪':'对比裁剪'}${b.id===f.selectedInstance?' · 关注对象':''}`));
+            const dl=create('dl');for(const [key,value]of [['鸟体检测',(b.bodyConfidence*100).toFixed(1)+'%'],['主体内部梯度',b.bodySharpness===null?'未判定':Math.round(b.bodySharpness).toLocaleString()],['有效主体像素',b.bodyPixels.toLocaleString()],['眼区候选梯度（不参与选择）',b.sharpness===null?'未判定':Math.round(b.sharpness).toLocaleString()],['候选跨帧对象',b.trackId===null?'未匹配':String(b.trackId)],['分割',b.mask?.path?'真实模型掩码':'未判定'],['裁剪原像素',b.cropRect.slice(2).join('×')]]){const row=create('div');row.append(create('dt','',key),create('dd','',value));dl.append(row)}card.append(dl);
+            if(b.eyeIssue)card.append(create('p','muted',b.eyeIssue));if(b.poseIssue)card.append(create('p','muted',b.poseIssue));birds.append(card)
+          }
+          if(!f.instances.length)birds.append(create('p','muted','没有可靠检出鸟体，无法生成鸟体裁剪，不以背景冒充。原图仍完整保留。'));
+          photo.append(birds);$('detail').append(photo)
+        }
+      }catch(error){$('detail').append(create('p','error',error.message))}
+    }
+    async function refresh(){
+      try{
+        const [s,groups]=await Promise.all([json('/status.json'),json('/groups.json')]);$('error').hidden=true;
+        $('stats').replaceChildren();for(const [title,value]of [['完成组',s.completedGroups+'/'+s.totalGroups],['完成照片',s.processedPhotos+'/'+s.totalPhotos],['保留候选',s.selectedPhotos],['待审',s.reviewPhotos],['建议淘汰',s.rejectedPhotos],['失败 / 未支持',s.failedPhotos+s.unsupportedPhotos],['裁剪 / 已选',s.cropCount+' / '+s.selectedCrops]]){const card=create('div','stat');card.append(create('b','',String(value)),create('span','',title));$('stats').append(card)}
+        $('phase').textContent=s.phase;$('status').textContent=({pending:'等待开始',running:'运行中',paused:'已安全暂停',error:'处理错误',completed:'全量结束'})[s.status]+' · '+new Date(s.updatedAt).toLocaleTimeString();
+        $('progress').max=s.totalPhotos||1;$('progress').value=s.processedPhotos;$('output').textContent='输出（仅裁剪图与JSON / 报告）：'+s.output;
+        $('inventory').textContent='清点 '+s.physicalPhotos+' 个图像文件 → '+s.totalPhotos+' 个逻辑拍摄项 · 关联RAW '+s.pairedRaw;
+        const list=$('groups');for(const g of groups){latestGroups.set(g.id,g);let card=groupElements.get(g.id);if(!card){card=create('button','group-card');card.dataset.id=g.id;card.append(create('span','empty','等待裁剪'));const info=create('div');info.append(create('b','',`第 ${g.index} 组 · ${g.count} 张`),create('small',''));card.append(info);card.onclick=()=>showGroup(latestGroups.get(g.id));groupElements.set(g.id,card);list.append(card)}card.classList.toggle('active',g.id===selectedGroup);
+          if(g.thumbnail&&card.dataset.thumb!==g.thumbnail){const image=create('img');image.src=media(g.thumbnail);image.loading='lazy';image.alt='第'+g.index+'组真实鸟体缩略图';card.replaceChild(image,card.firstChild);card.dataset.thumb=g.thumbnail}
+          if(!g.thumbnail)card.firstChild.textContent=g.status==='done'?'未检出鸟体':'等待裁剪';
+          card.lastChild.lastChild.textContent=g.status==='done'?`完成 · 保留 ${g.selected||0} · 待审 ${g.review||0} · 失败 ${g.failed||0}`:g.status==='running'?'处理中':'未完成'}
+        const active=groups.find(g=>g.id===selectedGroup);if(active&&active.status==='done'&&loadedCompleted!==active.id)await showGroup(active);if(!selectedGroup){const first=groups.find(g=>g.status==='done');if(first)await showGroup(first)}
+        $('pause').disabled=s.status!=='running';if(s.status==='error'){$('error').hidden=false;$('error').textContent='任务尚未完成：'+s.phase}
+      }catch(error){$('error').hidden=false;$('error').textContent='进度读取失败，不能当作完成：'+error.message}
+    }
+    $('close').onclick=()=>$('dialog').close();
+    window.addEventListener('resize',()=>{if($('dialog').open)alignOverlay()});
+    $('pause').onclick=async()=>{if(!confirm('暂停将在本组处理完成后生效，已完成组和原片保持不变。'))return;const r=await fetch('/cancel',{method:'POST'});if(!r.ok)alert('暂停请求失败：'+r.status)};
+    refresh();setInterval(refresh,2500);
+  </script>
+</body>
+</html>

@@ -1,0 +1,729 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+"""Sequential, resumable, crop-only local selection and report server."""
+import argparse
+from collections import Counter
+from datetime import datetime
+from email.utils import formatdate
+import hashlib
+import gzip
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+import ipaddress
+import json
+import math
+import mimetypes
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from urllib.parse import parse_qs, quote, unquote, urlparse
+import uuid
+
+import cv2
+import numpy as np
+from PIL import Image
+
+from batch_inference import NativeDetector, INFERENCE_VERSION, ROOT
+from preview_cache import PreviewCache, not_modified
+from species_reference import SpeciesReferences, ReferenceError
+
+POLICY_VERSION = "strict-crop-only-v1"
+SUPPORTED = {".jpg", ".jpeg", ".png"}
+RAW = {".arw", ".dng", ".nef", ".cr2", ".cr3", ".orf", ".raf", ".rw2"}
+PHOTO_FORMATS = SUPPORTED | RAW | {".tif", ".tiff", ".heic", ".heif", ".webp", ".bmp"}
+
+
+def digest(path):
+    hasher = hashlib.sha256()
+    with path.open("rb") as source:
+        for block in iter(lambda: source.read(1024 * 1024), b""):
+            hasher.update(block)
+    return hasher.hexdigest()
+
+
+def atomic_json(path, value):
+    temporary = path.with_name(path.name + ".part")
+    temporary.write_text(json.dumps(value, ensure_ascii=False, allow_nan=False), encoding="utf-8")
+    for attempt in range(10):
+        try:
+            temporary.replace(path)
+            return
+        except PermissionError:
+            if attempt == 9:
+                raise
+            time.sleep(.05)
+
+
+def read_json(path):
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def versions():
+    paths = [ROOT / "scripts" / "batch_inference.py", ROOT / "scripts" / "batch-policy.mjs",
+             ROOT / "src" / "culling" / "scoring.ts", ROOT / "src" / "lib" / "tracker.ts"]
+    models = ROOT / "public" / "culling" / "models"
+    return {
+        "inference": INFERENCE_VERSION, "policy": POLICY_VERSION,
+        "codeSha256": hashlib.sha256("".join(digest(p) for p in paths).encode()).hexdigest(),
+        "models": {name: digest(models / name) for name in ["bird-yolo11s-seg.onnx", "eye.onnx"]},
+    }
+
+
+def inventory(source):
+    records, others, formats, warnings = [], [], Counter(), []
+    for path in sorted(source.rglob("*")):
+        if not path.is_file():
+            continue
+        relative = path.relative_to(source).as_posix()
+        suffix = path.suffix.lower()
+        formats[suffix or "(无扩展名)"] += 1
+        if suffix not in PHOTO_FORMATS:
+            others.append(relative)
+            continue
+        if not path.resolve().is_relative_to(source):
+            warnings.append(f"路径越出源目录，未读取：{relative}")
+            records.append({"relative": relative, "format": suffix, "blocked": True, "size": 0, "mtimeNs": 0})
+            continue
+        stat = path.stat()
+        records.append({"relative": relative, "format": suffix, "size": stat.st_size, "mtimeNs": stat.st_mtime_ns})
+    buckets = {}
+    for record in records:
+        path = Path(record["relative"])
+        buckets.setdefault((path.parent.as_posix().casefold(), path.stem.casefold()), []).append(record)
+    photos = []
+    for entries in buckets.values():
+        previews = [r for r in entries if r["format"] in SUPPORTED]
+        raws = [r for r in entries if r["format"] in RAW]
+        primaries = previews + [r for r in entries if r["format"] not in SUPPORTED | RAW]
+        if not previews:
+            primaries += raws
+        for record in primaries:
+            companions = raws if previews and record is previews[0] else []
+            photo = {"id": f"p{len(photos) + 1:06d}", "primary": record, "companions": companions,
+                     "supported": record["format"] in SUPPORTED and not record.get("blocked"),
+                     "capturedAt": None, "timestamp": None, "exifOrientation": 1, "encodedSize": None}
+            if photo["supported"]:
+                try:
+                    with Image.open(source / record["relative"]) as image:
+                        exif = image.getexif()
+                        detail = exif.get_ifd(0x8769)
+                        stamp = detail.get(36867)
+                        sub = str(detail.get(37521, "0")).strip("\0 ")
+                        milliseconds = int((sub + "000")[:3]) if sub.isdigit() else 0
+                        when = datetime.strptime(stamp, "%Y:%m:%d %H:%M:%S") if stamp else None
+                        photo["capturedAt"] = when.isoformat() + f".{milliseconds:03d}" if when else None
+                        photo["timestamp"] = when.timestamp() * 1000 + milliseconds if when else None
+                        photo["exifOrientation"] = int(exif.get(274, 1))
+                        photo["encodedSize"] = [image.width, image.height]
+                except (OSError, ValueError, TypeError) as error:
+                    photo["metadataError"] = str(error)
+            photos.append(photo)
+    timed = sorted((p for p in photos if p["timestamp"] is not None), key=lambda p: (p["timestamp"], p["primary"]["relative"]))
+    groups, current = [], []
+    for photo in timed:
+        if current and (photo["timestamp"] - current[-1]["timestamp"] > 2000 or photo["timestamp"] - current[0]["timestamp"] > 10000):
+            groups.append(current)
+            current = []
+        current.append(photo)
+    if current:
+        groups.append(current)
+    groups.extend([[p] for p in photos if p["timestamp"] is None])
+    group_records = [{"id": f"g{i + 1:05d}", "index": i + 1, "photoIds": [p["id"] for p in group],
+                      "count": len(group), "capturedAt": group[0]["capturedAt"],
+                      "grouping": "EXIF原始拍摄时间+子秒，相邻≤2秒，总长≤10秒" if group[0]["timestamp"] is not None else "无可信拍摄时间，独立单张",
+                      "status": "pending", "thumbnail": None} for i, group in enumerate(groups)]
+    return {
+        "source": str(source), "photos": photos, "groups": group_records, "formats": dict(formats),
+        "physicalPhotos": len(records), "pairedRaw": sum(len(p["companions"]) for p in photos),
+        "rawOnly": sum(not p["supported"] and p["primary"]["format"] in RAW for p in photos),
+        "otherFiles": others, "warnings": warnings, "sourceBytes": sum(r["size"] for r in records),
+    }
+
+
+def initialize(source):
+    source = source.resolve(strict=True)
+    if not source.is_dir():
+        raise ValueError("源目录不存在")
+    manifest = inventory(source)
+    free = shutil.disk_usage(source.parent).free
+    if free < 1024 * 1024 * 1024:
+        raise RuntimeError("可用空间不足1GiB，未创建输出")
+    model_versions = versions()
+    job = source.parent / f"BirdShot_Selection_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}"
+    job.mkdir()
+    for folder in ["groups", "crops", "selected", "report"]:
+        (job / folder).mkdir()
+    manifest.update({"output": str(job), "createdAt": datetime.now().isoformat(), "versions": model_versions,
+                     "storage": "crop-only", "freeBytesAtStart": free,
+                     "limitations": "JPEG用于分析；配对RAW只记录溯源，不独立解码或复制。单张无绝对合焦校准，严格策略待审。眼区不参与自动选择。"})
+    atomic_json(job / "manifest.json", manifest)
+    atomic_json(job / "groups.json", manifest["groups"])
+    atomic_json(job / "mapping.json", {"sourceRoot": str(source), "versions": manifest["versions"], "crops": []})
+    state = {"status": "pending", "totalGroups": len(manifest["groups"]), "totalPhotos": len(manifest["photos"]),
+             "physicalPhotos": manifest["physicalPhotos"], "pairedRaw": manifest["pairedRaw"],
+             "completedGroups": 0, "processedPhotos": 0, "selectedPhotos": 0, "reviewPhotos": 0,
+             "rejectedPhotos": 0, "failedPhotos": 0, "unsupportedPhotos": 0, "cropCount": 0, "selectedCrops": 0,
+             "currentGroup": None, "phase": "已清点，等待开始", "output": str(job), "startedAt": None, "updatedAt": datetime.now().isoformat()}
+    atomic_json(job / "status.json", state)
+    shutil.copyfile(ROOT / "scripts" / "batch-report.html", job / "report" / "index.html")
+    atomic_json(ROOT / ".tools" / "batch-current.json", {"job": str(job)})
+    print(json.dumps({"job": str(job), "photos": state["totalPhotos"], "physical": state["physicalPhotos"],
+                      "pairedRaw": state["pairedRaw"], "rawOnly": manifest["rawOnly"], "groups": state["totalGroups"]}, ensure_ascii=False), flush=True)
+    return job
+
+
+def write_image(path, image, quality=95):
+    ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    if not ok:
+        raise RuntimeError("裁剪图编码失败")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".part")
+    data = encoded.tobytes()
+    temporary.write_bytes(data)
+    temporary.replace(path)
+    expected = hashlib.sha256(data).hexdigest()
+    if digest(path) != expected:
+        raise RuntimeError("裁剪图写入完整性校验失败")
+    return expected
+
+
+def create_crops(job, image, frame, photo, source_hash):
+    height, width = image.shape[:2]
+    records = []
+    for bird in frame["instances"]:
+        bx, by, bw, bh = bird["body"]
+        margin = max(bw, bh) * .05
+        x, y = max(0, math.floor(bx - margin)), max(0, math.floor(by - margin))
+        right, bottom = min(width, math.ceil(bx + bw + margin)), min(height, math.ceil(by + bh + margin))
+        relative = f"crops/{frame['group']}/{frame['id']}_b{bird['id']:02d}.jpg"
+        target = job / relative
+        crop_hash = write_image(target, image[y:bottom, x:right])
+        thumb_relative = f"crops/{frame['group']}/{frame['id']}_b{bird['id']:02d}_thumb.jpg"
+        crop = image[y:bottom, x:right]
+        scale = min(1, 420 / max(crop.shape[:2]))
+        thumbnail = cv2.resize(crop, (max(1, round(crop.shape[1] * scale)), max(1, round(crop.shape[0] * scale))))
+        write_image(job / thumb_relative, thumbnail, 85)
+        bird["crop"] = relative
+        bird["thumbnail"] = thumb_relative
+        bird["cropRect"] = [x, y, right - x, bottom - y]
+        bird["cropSha256"] = crop_hash
+        records.append({
+            "crop": relative, "cropSha256": crop_hash, "groupId": frame["group"], "photoId": frame["id"], "instanceId": bird["id"],
+            "sourceRelative": photo["primary"]["relative"], "sourceSha256": source_hash,
+            "rawCompanions": [raw["relative"] for raw in photo["companions"]],
+            "sourceSizeBytes": photo["primary"]["size"], "sourceMtimeNs": photo["primary"]["mtimeNs"],
+            "encodedOriginalSize": photo["encodedSize"], "displayOriginalSize": [width, height],
+            "exifOrientation": photo["exifOrientation"], "coordinateSystem": "JPEG显示方向（已应用EXIF），原像素",
+            "cropRect": bird["cropRect"], "detectedBox": bird["body"], "resized": False, "jpegQuality": 95,
+            "bodyConfidence": bird["bodyConfidence"], "bodyTenengrad": bird["bodySharpness"], "bodyPixels": bird["bodyPixels"],
+            "eyeCandidateTenengrad": bird["sharpness"], "eyeIssue": bird["eyeIssue"], "selected": False,
+        })
+    return records
+
+
+class PolicyWorker:
+    def __init__(self, node):
+        self.process = subprocess.Popen([str(node), "--experimental-strip-types", str(ROOT / "scripts" / "batch-policy.mjs")],
+                                        stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True, encoding="utf-8", cwd=ROOT)
+    def rank(self, frames):
+        self.process.stdin.write(json.dumps({"frames": frames}, allow_nan=False) + "\n")
+        self.process.stdin.flush()
+        line = self.process.stdout.readline()
+        if not line:
+            raise RuntimeError("共享分组策略进程退出")
+        result = json.loads(line)
+        if not result["ok"]:
+            raise RuntimeError(result["error"])
+        return result["results"]
+    def close(self):
+        self.process.stdin.close()
+        self.process.wait(timeout=15)
+
+
+def empty_frame(photo, group, issue):
+    return {"id": photo["id"], "group": group, "width": 0, "height": 0, "body": None, "bodyConfidence": None,
+            "birdCount": 0, "eye": None, "beak": None, "patch": None, "sharpness": None, "issue": issue,
+            "decision": "review", "reason": issue, "relative": None, "rank": None, "cohortSize": 0,
+            "instances": [], "selectedInstance": None, "bodySharpness": None, "bodyPixels": 0, "basis": None}
+
+
+def recover_completed(job, manifest, state):
+    source = Path(manifest["source"]).resolve()
+    groups = read_json(job / "groups.json")
+    mapping = {"sourceRoot": str(source), "versions": manifest["versions"], "crops": []}
+    for key in ["completedGroups", "processedPhotos", "selectedPhotos", "reviewPhotos", "rejectedPhotos",
+                "failedPhotos", "unsupportedPhotos", "cropCount", "selectedCrops"]:
+        state[key] = 0
+    for group in groups:
+        result_path = job / "groups" / f"{group['id']}.json"
+        if not result_path.exists():
+            group["status"] = "pending"
+            continue
+        result = read_json(result_path)
+        if result["versions"] != manifest["versions"]:
+            raise RuntimeError("已完成组的模型/策略版本不一致")
+        frames = result["frames"]
+        for frame in frames:
+            if frame.get("sourceSha256"):
+                original = (source / frame["source"]["primary"]["relative"]).resolve()
+                if not original.is_relative_to(source) or digest(original) != frame["sourceSha256"]:
+                    raise RuntimeError("已完成组的原片指纹改变，拒绝混用缓存")
+        crop_records = result["cropMapping"]
+        for record in crop_records:
+            if digest(job / record["crop"]) != record["cropSha256"]:
+                raise RuntimeError("缓存裁剪完整性校验失败")
+            if record.get("selected") and digest(job / record["selectedPath"]) != record["cropSha256"]:
+                raise RuntimeError("缓存选中裁剪完整性校验失败")
+        group.update(status="done",
+                     thumbnail=next((b["thumbnail"] for f in frames for b in f["instances"] if b.get("thumbnail")), None),
+                     selected=sum(f["decision"] == "keep" and bool(f.get("selectedCrop")) for f in frames),
+                     review=sum(f["decision"] == "review" and f.get("processingStatus") == "ok" for f in frames),
+                     failed=sum(f.get("processingStatus") == "failed" for f in frames))
+        state["completedGroups"] += 1
+        state["processedPhotos"] += len(frames)
+        state["selectedPhotos"] += group["selected"]
+        state["reviewPhotos"] += group["review"]
+        state["failedPhotos"] += group["failed"]
+        state["rejectedPhotos"] += sum(f["decision"] == "reject" and f.get("processingStatus") == "ok" for f in frames)
+        state["unsupportedPhotos"] += sum(f.get("processingStatus") == "unsupported" for f in frames)
+        state["cropCount"] += len(crop_records)
+        state["selectedCrops"] += len(result["selectedCrops"])
+        mapping["crops"].extend(crop_records)
+    atomic_json(job / "groups.json", groups)
+    atomic_json(job / "mapping.json", mapping)
+    atomic_json(job / "status.json", state)
+    return groups, mapping
+
+
+def run(job, node, threads=4):
+    manifest, state = read_json(job / "manifest.json"), read_json(job / "status.json")
+    if manifest["versions"] != versions():
+        raise RuntimeError("模型或策略版本已变化，不能混用旧任务缓存")
+    source = Path(manifest["source"]).resolve(strict=True)
+    groups, mapping = recover_completed(job, manifest, state)
+    photos = {p["id"]: p for p in manifest["photos"]}
+    state.update({"status": "running", "startedAt": state["startedAt"] or datetime.now().isoformat(), "phase": "载入本机CPU模型"})
+    atomic_json(job / "status.json", state)
+    worker = None
+    try:
+        detector = NativeDetector(threads)
+        worker = PolicyWorker(node)
+        (job / "cancel.request").unlink(missing_ok=True)
+        for group in groups:
+            if group["status"] == "done":
+                continue
+            if (job / "cancel.request").exists():
+                state.update(status="paused", phase="已安全暂停，已完成组保留，可恢复")
+                break
+            group["status"] = "running"
+            state["currentGroup"] = group["id"]
+            atomic_json(job / "groups.json", groups)
+            frames, crop_records, issues = [], [], []
+            for index, photo_id in enumerate(group["photoIds"]):
+                photo = photos[photo_id]
+                def progress(message):
+                    state["phase"] = f"组{group['index']}/{len(groups)} · 照片{index + 1}/{group['count']} · {message}"
+                    state["updatedAt"] = datetime.now().isoformat()
+                    atomic_json(job / "status.json", state)
+                progress("读取原图，仅读不写")
+                path = (source / photo["primary"]["relative"]).resolve()
+                if not photo["supported"]:
+                    frame = empty_frame(photo, group["id"], "格式未支持或路径越界，已清点但未解码，不生成虚假裁剪")
+                    frame["processingStatus"] = "unsupported"
+                else:
+                    try:
+                        if not path.is_relative_to(source):
+                            raise RuntimeError("源图片路径越出已授权目录")
+                        stat = path.stat()
+                        if stat.st_size != photo["primary"]["size"] or stat.st_mtime_ns != photo["primary"]["mtimeNs"]:
+                            raise RuntimeError("源文件相对清点时已变化，严格策略不处理此版本")
+                        data = path.read_bytes()
+                        source_hash = hashlib.sha256(data).hexdigest()
+                        image = cv2.imdecode(np.frombuffer(data, np.uint8), cv2.IMREAD_COLOR)
+                        if image is None:
+                            raise RuntimeError("JPEG/PNG解码失败")
+                        if image.shape[0] * image.shape[1] > 60_000_000:
+                            raise RuntimeError("超出本机Demo 6000万像素限制")
+                        frame = detector.analyze(image, photo_id, group["id"], progress)
+                        records = create_crops(job, image, frame, photo, source_hash)
+                        after = path.stat()
+                        if after.st_size != stat.st_size or after.st_mtime_ns != stat.st_mtime_ns:
+                            raise RuntimeError("分析期间源文件发生外部变化，结果不能作为保留依据")
+                        frame["sourceSha256"] = source_hash
+                        frame["processingStatus"] = "ok"
+                        crop_records.extend(records)
+                        del image, data
+                    except (OSError, ValueError, RuntimeError, cv2.error) as error:
+                        frame = empty_frame(photo, group["id"], str(error))
+                        frame["processingStatus"] = "failed"
+                        issues.append({"photoId": photo_id, "error": str(error)})
+                        print(f"{group['id']} {photo_id}: {error}", file=sys.stderr, flush=True)
+                frame["source"] = photo
+                frames.append(frame)
+            ranked = worker.rank(frames)
+            selected_paths = []
+            for frame in ranked:
+                for record in (r for r in crop_records if r["photoId"] == frame["id"]):
+                    record.update({"decision": frame["decision"], "relative": frame["relative"], "basis": frame["basis"],
+                                   "cohortSize": frame["cohortSize"], "reason": frame["reason"],
+                                   "isFocusInstance": record["instanceId"] == frame["selectedInstance"]})
+                if frame["decision"] != "keep" or frame.get("processingStatus") != "ok":
+                    continue
+                bird = next(b for b in frame["instances"] if b["id"] == frame["selectedInstance"])
+                source_crop = job / bird["crop"]
+                selected_relative = f"selected/{group['id']}_{frame['id']}_b{bird['id']:02d}.jpg"
+                destination = job / selected_relative
+                temporary = destination.with_name(destination.name + ".part")
+                try:
+                    if shutil.disk_usage(job).free < source_crop.stat().st_size + 100 * 1024 * 1024:
+                        raise RuntimeError("剩余空间不足，未保存选中裁剪")
+                    shutil.copyfile(source_crop, temporary)
+                    if digest(temporary) != bird["cropSha256"]:
+                        raise RuntimeError("选中裁剪复制校验失败")
+                    if destination.exists() and digest(destination) != bird["cropSha256"]:
+                        raise RuntimeError("输出已有不同内容，拒绝覆盖")
+                    temporary.replace(destination)
+                    frame["selectedCrop"] = selected_relative
+                    selected_paths.append(selected_relative)
+                    for record in crop_records:
+                        if record["crop"] == bird["crop"]:
+                            record.update(selected=True, selectedPath=selected_relative)
+                except (OSError, RuntimeError) as error:
+                    temporary.unlink(missing_ok=True)
+                    frame.update(processingStatus="failed", decision="review", reason=str(error))
+                    for record in crop_records:
+                        if record["photoId"] == frame["id"]:
+                            record.update(decision="review", reason=str(error), selected=False)
+                    issues.append({"photoId": frame["id"], "error": str(error)})
+            completed = {"group": group, "frames": ranked, "errors": issues, "selectedCrops": selected_paths, "cropMapping": crop_records,
+                         "versions": manifest["versions"], "completedAt": datetime.now().isoformat()}
+            atomic_json(job / "groups" / f"{group['id']}.json", completed)
+            group.update(status="done", thumbnail=next((b["thumbnail"] for f in ranked for b in f["instances"] if b.get("thumbnail")), None),
+                         selected=sum(f["decision"] == "keep" and bool(f.get("selectedCrop")) for f in ranked),
+                         review=sum(f["decision"] == "review" and f.get("processingStatus") == "ok" for f in ranked),
+                         failed=sum(f.get("processingStatus") == "failed" for f in ranked))
+            state["completedGroups"] += 1
+            state["processedPhotos"] += len(ranked)
+            state["selectedPhotos"] += sum(f["decision"] == "keep" and bool(f.get("selectedCrop")) for f in ranked)
+            state["reviewPhotos"] += sum(f["decision"] == "review" and f.get("processingStatus") == "ok" for f in ranked)
+            state["rejectedPhotos"] += sum(f["decision"] == "reject" and f.get("processingStatus") == "ok" for f in ranked)
+            state["failedPhotos"] += sum(f.get("processingStatus") == "failed" for f in ranked)
+            state["unsupportedPhotos"] += sum(f.get("processingStatus") == "unsupported" for f in ranked)
+            state["cropCount"] += len(crop_records)
+            state["selectedCrops"] += len(selected_paths)
+            state["updatedAt"] = datetime.now().isoformat()
+            mapping["crops"].extend(crop_records)
+            atomic_json(job / "mapping.json", mapping)
+            atomic_json(job / "groups.json", groups)
+            atomic_json(job / "status.json", state)
+            print(f"{group['id']} done {state['processedPhotos']}/{state['totalPhotos']} selected={state['selectedPhotos']} review={state['reviewPhotos']} crops={state['cropCount']}", flush=True)
+        else:
+            state.update(status="completed", phase="全量已处理；待审/失败/未支持均明确列出", currentGroup=None)
+        atomic_json(job / "status.json", state)
+    except BaseException as error:
+        state.update(status="paused" if isinstance(error, KeyboardInterrupt) else "error", phase=str(error) or "处理已中断")
+        atomic_json(job / "status.json", state)
+        raise
+    finally:
+        if worker:
+            worker.close()
+
+
+def serve(job, port, lan_ip=None, prefix=24):
+    manifest = read_json(job / "manifest.json")
+    source = Path(manifest["source"]).resolve()
+    photos = {p["id"]: p for p in manifest["photos"]}
+    previews = PreviewCache(source, photos, job / "revisions" / "image-preview-cache-v1")
+    gallery_revision = job / "revisions" / "verified-birds-birder-v2"
+    species_references = SpeciesReferences(job, [])
+    species_index_signature = None
+    species_index_lock = threading.Lock()
+    def reference_manager():
+        nonlocal species_index_signature
+        path = gallery_revision / "gallery.json"
+        with species_index_lock:
+            signature = (path.stat().st_mtime_ns, path.stat().st_size)
+            if signature != species_index_signature:
+                gallery = read_json(path)
+                species_references.allowed = {candidate["scientificName"].casefold(): candidate["scientificName"]
+                    for item in gallery["items"] for candidate in item.get("species", {}).get("top5", [])
+                    if candidate.get("isBird") and isinstance(candidate.get("scientificName"), str)}
+                species_index_signature = signature
+        return species_references
+    lan_network = None
+    if lan_ip:
+        address = ipaddress.IPv4Address(lan_ip)
+        if not any(address in ipaddress.IPv4Network(block) for block in ["10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"]):
+            raise ValueError("LAN service requires the explicitly selected RFC1918 interface address")
+        lan_network = ipaddress.IPv4Network(f"{lan_ip}/{prefix}", strict=False)
+    allowed_media = set()
+    media_mapping_signature = None
+    def refresh_registered_media():
+        nonlocal allowed_media, media_mapping_signature
+        mapping_path = job / "mapping.json"
+        signature = (mapping_path.stat().st_mtime_ns, mapping_path.stat().st_size)
+        if signature == media_mapping_signature:
+            return
+        registered = set()
+        for record in read_json(mapping_path)["crops"]:
+            registered.add(record["crop"])
+            registered.add(record["crop"][:-4] + "_thumb.jpg")
+            if record.get("selectedPath"):
+                registered.add(record["selectedPath"])
+        allowed_media, media_mapping_signature = registered, signature
+    refresh_registered_media()
+    compressed_cache = {}
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+        def allowed(self):
+            host = self.headers.get("Host", "")
+            origin = self.headers.get("Origin")
+            remote = ipaddress.ip_address(self.client_address[0])
+            remote_allowed = remote == ipaddress.ip_address("127.0.0.1") or (lan_network is not None and remote in lan_network)
+            host_allowed = host.split(":")[0].lower() in {"127.0.0.1", "localhost", lan_ip}
+            return remote_allowed and host_allowed and (not origin or origin == f"http://{host}")
+        def image_headers(self, status, source_info, length=None, download_name=None, cache_state=None, content_type="image/jpeg"):
+            self.send_response(status)
+            self.send_header("Content-Type", content_type)
+            self.send_header("ETag", source_info.etag)
+            self.send_header("Last-Modified", formatdate(source_info.modified, usegmt=True))
+            self.send_header("Cache-Control", "private, max-age=0, must-revalidate")
+            self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            if length is not None:
+                self.send_header("Content-Length", str(length))
+            if cache_state:
+                self.send_header("X-BirdShot-Preview-Cache", cache_state)
+            if download_name:
+                safe_name = re.sub(r'[^A-Za-z0-9._-]', '_', download_name)
+                self.send_header("Content-Disposition", f"attachment; filename=\"{safe_name}\"; filename*=UTF-8''{quote(download_name, safe='')}")
+            self.end_headers()
+        def serve_image(self, frame_id, edge=None, download=False):
+            try:
+                info = previews.describe(frame_id, edge)
+                filename = info.path.name if download else None
+                content_type = "image/png" if edge is None and info.path.suffix.lower() == ".png" else "image/jpeg"
+                if not_modified(self.headers, info):
+                    self.image_headers(304, info, download_name=filename, content_type=content_type)
+                    return
+                if edge is None:
+                    data = info.path.read_bytes()
+                    after = info.path.stat()
+                    if (after.st_size, after.st_mtime_ns) != (info.size, info.mtime_ns):
+                        raise RuntimeError("Original changed while it was read")
+                    state = None
+                else:
+                    preview = previews.get(frame_id, edge)
+                    data, info = preview.data, preview.source
+                    state = "hit" if preview.hit else "generated"
+                self.image_headers(200, info, len(data), filename, state, content_type)
+                try:
+                    self.wfile.write(data)
+                except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError) as error:
+                    print(f"Image client disconnected: {type(error).__name__}", file=sys.stderr)
+            except KeyError:
+                self.send_error(404, "Unknown registered image")
+            except ValueError as error:
+                print(f"Invalid image preview request: {error}", file=sys.stderr)
+                self.send_error(400, "Invalid image preview parameters")
+            except FileNotFoundError:
+                self.send_error(404, "Registered original is missing")
+            except (OSError, RuntimeError, Image.DecompressionBombError) as error:
+                print(f"Image preview failed for {frame_id}: {error}", file=sys.stderr)
+                self.send_error(500, "Image preview could not be generated")
+        def do_GET(self):
+            if not self.allowed():
+                self.send_error(403)
+                return
+            route = unquote(urlparse(self.path).path)
+            if "\x00" in route:
+                self.send_error(400)
+                return
+            query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+            if route == "/species-reference":
+                name = query.get("scientificName", [""])[0]
+                try:
+                    if set(query) != {"scientificName"} or len(query["scientificName"]) != 1:
+                        raise ValueError("只接受一个候选学名")
+                    result = reference_manager().get(name)
+                    status = 502 if result["status"] == "error" else 200
+                except ValueError as error:
+                    result = {"status": "error", "scientificName": name[:100], "article": None, "image": None, "message": str(error)}
+                    status = 400
+                except (OSError, ReferenceError) as error:
+                    print(f"Species reference failed: {error}", file=sys.stderr)
+                    result = {"status": "error", "scientificName": name[:100], "article": None, "image": None,
+                              "message": "本地参考资料缓存暂不可用"}
+                    status = 502
+                data = json.dumps(result, ensure_ascii=False).encode("utf-8")
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "private, max-age=300" if result["status"] == "ready" else "no-store")
+                self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                try:
+                    self.wfile.write(data)
+                except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+                    print("Species reference client disconnected", file=sys.stderr)
+                return
+            if route.startswith("/species-media/"):
+                try:
+                    path = species_references.media(route[len("/species-media/"):])
+                    data = path.read_bytes()
+                except (ValueError, FileNotFoundError):
+                    self.send_error(404)
+                    return
+                except OSError as error:
+                    print(f"Species image cache failed: {error}", file=sys.stderr)
+                    self.send_error(500)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "image/jpeg")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "private, max-age=604800, immutable")
+                self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                try:
+                    self.wfile.write(data)
+                except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError):
+                    print("Species media client disconnected", file=sys.stderr)
+                return
+            if route == "/preview" or route.startswith("/preview/"):
+                match = re.fullmatch(r"/preview/(p\d{6})/(960|1920|3840)\.jpg", route)
+                if not match or query:
+                    self.send_error(400, "Allowed preview edges: 960, 1920, 3840")
+                    return
+                self.serve_image(match.group(1), int(match.group(2)))
+                return
+            if route.startswith("/original/"):
+                match = re.fullmatch(r"/original/(p\d{6})", route)
+                if not match or query not in ({}, {"download": ["1"]}):
+                    self.send_error(400, "Invalid original image request")
+                    return
+                self.serve_image(match.group(1), download=bool(query))
+                return
+            path = None
+            if route in {"/", "/index.html"}:
+                gallery_page = ROOT / "scripts" / "gallery-report.html"
+                path = gallery_page if gallery_page.exists() else job / "report" / "index.html"
+            elif route in {"/legacy", "/legacy/"}:
+                path = job / "report" / "index.html"
+            elif route == "/gallery.json":
+                path = gallery_revision / "gallery.json"
+                if not path.exists():
+                    payload = {"version": 1, "revision": "verified-bird-gallery-birder-v2", "status": "processing", "updatedAt": datetime.now().isoformat(),
+                               "progress": {"processed": 0, "total": 5504},
+                               "summary": {"preferred": 0, "bird": 0, "nonBird": 0, "unknown": 5504, "oldSelected": 343,
+                                           "removedOld": 0, "addedNew": 0}, "items": [],
+                               "notice": "全部候选尚未完成验鸟；不将旧343候选当新优选"}
+                    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.send_header("Cache-Control", "no-store")
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
+            elif re.fullmatch(r"/gallery/group/g\d{5}\.json", route):
+                path = gallery_revision / "groups" / route.rsplit("/", 1)[-1]
+            elif route in {"/status.json", "/groups.json", "/mapping.json", "/manifest.json", "/verification.json"}:
+                path = job / route[1:]
+            elif re.fullmatch(r"/group/g\d{5}\.json", route):
+                path = job / "groups" / route.rsplit("/", 1)[-1]
+            elif route.startswith("/media/"):
+                refresh_registered_media()
+                relative = route[len("/media/"):]
+                candidate = (job / relative).resolve()
+                if relative in allowed_media and candidate.is_relative_to(job.resolve()) and candidate.suffix.lower() in {".jpg", ".jpeg", ".png"}:
+                    path = candidate
+            if path is None or not path.is_file():
+                self.send_error(404)
+                return
+            use_gzip = path.suffix == ".json" and "gzip" in self.headers.get("Accept-Encoding", "")
+            try:
+                stat = path.stat()
+                cache_key = (str(path), stat.st_mtime_ns, stat.st_size)
+                data = compressed_cache.get(cache_key) if use_gzip else None
+                if data is None:
+                    data = path.read_bytes()
+                    if use_gzip:
+                        data = gzip.compress(data, compresslevel=3, mtime=0)
+                        if len(compressed_cache) >= 16:
+                            compressed_cache.clear()
+                        compressed_cache[cache_key] = data
+            except OSError:
+                self.send_error(500)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", (mimetypes.guess_type(path.name)[0] or "application/octet-stream") + ("; charset=utf-8" if path.suffix in {".json", ".html"} else ""))
+            self.send_header("Content-Length", str(len(data)))
+            if use_gzip:
+                self.send_header("Content-Encoding", "gzip")
+                self.send_header("Vary", "Accept-Encoding")
+            self.send_header("Cache-Control", "private, max-age=3600" if route.startswith("/media/") else "no-store")
+            self.send_header("Cross-Origin-Resource-Policy", "same-origin")
+            self.send_header("X-Content-Type-Options", "nosniff")
+            self.end_headers()
+            try:
+                self.wfile.write(data)
+            except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError) as error:
+                print(f"Report client disconnected: {type(error).__name__}", file=sys.stderr)
+        def do_POST(self):
+            host = self.headers.get("Host", "").split(":")[0].lower()
+            if self.client_address[0] != "127.0.0.1" or host not in {"127.0.0.1", "localhost"} or not self.allowed() or self.path != "/cancel":
+                self.send_error(403)
+                return
+            (job / "cancel.request").write_text("requested", encoding="ascii")
+            self.send_response(202)
+            self.end_headers()
+    class ReportServer(ThreadingHTTPServer):
+        request_queue_size = 64
+        daemon_threads = True
+    addresses = ["127.0.0.1"] + ([lan_ip] if lan_ip else [])
+    servers = [ReportServer((address, port), Handler) for address in addresses]
+    for address in addresses:
+        print(f"REPORT_READY http://{address}:{port}/", flush=True)
+    for server in servers[1:]:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        servers[0].serve_forever()
+    finally:
+        for server in servers:
+            server.server_close()
+
+
+if __name__ == "__main__":
+    sys.stdout.reconfigure(encoding="utf-8")
+    parser = argparse.ArgumentParser()
+    parser.add_argument("operation", choices=["init", "run", "serve"])
+    parser.add_argument("--source", type=Path)
+    parser.add_argument("--job", type=Path)
+    parser.add_argument("--node", type=Path, default=ROOT / ".tools" / "node-v24.11.1-win-x64" / "node.exe")
+    parser.add_argument("--port", type=int, default=5174)
+    parser.add_argument("--threads", type=int, default=4)
+    parser.add_argument("--lan-ip", help="Explicit physical-interface RFC1918 IPv4; default stays loopback-only")
+    parser.add_argument("--lan-prefix", type=int, default=24)
+    args = parser.parse_args()
+    if args.operation == "init":
+        initialize(args.source)
+    elif args.operation == "run":
+        job_path = args.job.resolve(strict=True)
+        lock = job_path / "run.lock"
+        try:
+            with lock.open("x", encoding="ascii") as output:
+                output.write(str(os.getpid()))
+        except FileExistsError:
+            raise RuntimeError("任务已有运行锁；确认旧进程已停止后才可移除该任务的 run.lock")
+        try:
+            run(job_path, args.node, args.threads)
+        finally:
+            lock.unlink(missing_ok=True)
+    else:
+        serve(args.job.resolve(strict=True), args.port, args.lan_ip, args.lan_prefix)

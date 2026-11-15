@@ -1,10 +1,15 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
+import { localPhotosPlugin } from './scripts/local-photos-plugin.ts'
 
 export default defineConfig({
+  server: {
+    watch: { ignored: ['**/.tools/**', '**/.venv/**', '**/public/culling/models/**', '**/public/culling/samples/**'] },
+  },
   plugins: [
     react(),
+    localPhotosPlugin(),
     VitePWA({
       registerType: 'autoUpdate',
       includeAssets: ['favicon.svg'],
@@ -27,6 +32,7 @@ export default defineConfig({
       },
       workbox: {
         globPatterns: ['**/*.{js,css,html,svg,png,wasm,onnx,json}'],
+        globIgnores: ['**/culling/**'],
         maximumFileSizeToCacheInBytes: 60 * 1024 * 1024,
         runtimeCaching: [
           {

@@ -1,0 +1,965 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; img-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'">
+  <title>BirdShot · 优选鸟体</title>
+  <style>
+    :root{font:14px/1.6 "Segoe UI","Microsoft YaHei",sans-serif;color:#e5e9e1;background:#151a17;color-scheme:dark;--muted:#a6b0a5;--border:#364137;--accent:#d1e4a0}
+    *{box-sizing:border-box}[hidden]{display:none!important}body{margin:0}button,input,select{font:inherit}button,a,input,select{outline-offset:4px}button,select,input{color:inherit;background:#232c25;border:1px solid #485548;border-radius:7px;padding:8px 11px}button{cursor:pointer}button:disabled{opacity:.45;cursor:default}a{color:var(--accent);text-underline-offset:3px}h1,h2,h3,p{margin:0}h1{font-size:23px;font-weight:650}h2{font-size:20px}h3{font-size:15px}small,.muted{color:var(--muted);font-size:12px}
+    header{border-bottom:1px solid var(--border);padding:17px max(24px,4vw);display:flex;align-items:center;gap:20px;flex-wrap:wrap}header .brand{font-weight:750;letter-spacing:1px;color:var(--accent)}header h1{margin-right:auto}.header-tools{display:flex;gap:15px;align-items:center;font-size:12px}.status{border:1px solid #536449;color:var(--accent);border-radius:20px;padding:3px 10px;font-size:12px}
+    main{max-width:1800px;margin:auto;padding:17px max(24px,4vw) 35px}.progress-row{display:flex;gap:15px;align-items:center;flex-wrap:wrap;font-size:12px;color:var(--muted)}progress{height:5px;width:160px;accent-color:var(--accent)}#counts{margin-left:auto;color:#c7d1c1}#change-counts{margin-top:5px;color:var(--muted);font-size:11px}
+    .toolbar{display:flex;gap:12px;align-items:end;flex-wrap:wrap;margin:20px 0 16px}.tabs{display:flex;gap:3px;background:#202821;padding:3px;border-radius:9px;margin-right:auto}.tabs button{border-color:transparent;background:transparent}.tabs button[aria-selected="true"]{background:var(--accent);color:#22301b;font-weight:650}.field{display:grid;gap:3px;font-size:11px;color:var(--muted)}.field input{width:195px}.check{display:flex;gap:6px;align-items:center;font-size:12px;min-height:40px}.check input{accent-color:var(--accent)}
+    .results-line{display:flex;justify-content:space-between;gap:15px;margin-bottom:12px;color:var(--muted);font-size:12px}.gallery{display:grid;grid-template-columns:repeat(auto-fill,minmax(240px,1fr));gap:19px}.tile{min-width:0;background:#202821;border:1px solid #354135;border-radius:10px;overflow:hidden}.tile-open{display:block;width:100%;padding:0;text-align:left;background:transparent;border:0;border-radius:0;height:100%}.tile-open:hover{background:#293329}.tile-open:focus-visible{outline:2px solid var(--accent);outline-offset:-3px}.thumb{position:relative;background:#0e1310;aspect-ratio:4/3;display:grid;place-items:center;overflow:hidden}.thumb img{width:100%;height:100%;object-fit:contain;position:absolute;inset:0}.image-error{color:#d8b8a2;font-size:12px;text-align:center;padding:12px}.tile-info{padding:12px 14px 14px}.tile-heading{display:flex;align-items:start;gap:8px;justify-content:space-between}.species{font-size:16px;font-weight:650;overflow-wrap:anywhere}.rank{color:var(--accent);font-size:12px;white-space:nowrap}.badges{display:flex;gap:7px;flex-wrap:wrap;margin:7px 0}.badge{display:inline-block;border:1px solid #50603e;background:#303e27;color:#d0e1ad;font-size:11px;border-radius:4px;padding:1px 6px}.badge.review{border-color:#6e6043;color:#e4c891;background:#3a3326}.badge.nonbird{border-color:#6d4f4b;color:#e4b7ac;background:#392a28}.reason{font-size:12px;color:#c7cfc2;overflow-wrap:anywhere}.clamp{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}.source{font-size:11px;color:var(--muted);margin-top:9px;overflow-wrap:anywhere}
+    .notice{border:1px solid #566348;background:#252e21;border-radius:8px;padding:12px 15px;margin:12px 0}.notice.error{border-color:#885e4e;background:#392a23;color:#f1cbb6}.notice p{margin:4px 0}.empty{padding:65px 20px;text-align:center;border:1px dashed #465242;border-radius:10px;background:#1b221c}.empty h2{margin-bottom:8px}.pager{display:flex;gap:14px;align-items:center;justify-content:center;margin:25px 0 12px}.pager span{font-size:12px;color:var(--muted)}footer{font-size:11px;color:var(--muted);border-top:1px solid var(--border);padding-top:15px;margin-top:22px;display:flex;gap:15px;justify-content:space-between;flex-wrap:wrap}
+    .species-candidates{display:grid;gap:7px;margin:9px 0}.species-candidate{font-size:12px;overflow-wrap:anywhere}.species-candidate strong{font-weight:600}.scientific,.classification-score{display:block;color:var(--muted);font-size:11px}.classification-note{color:var(--muted);font-size:10px}.details-copy>h3:not(:first-child){margin-top:17px}
+    .compact-classification .species-candidates{gap:4px;margin:6px 0}.compact-classification .scientific{display:inline;margin-left:6px;font-size:10px}.compact-classification .classification-score{font-size:10px;line-height:1.4}
+    dialog{border:1px solid #53634c;background:#1b231d;color:inherit;border-radius:12px;width:min(1440px,96vw);max-height:94vh;padding:0}dialog::backdrop{background:#050a07d9}.dialog-header{position:sticky;top:0;z-index:2;background:#1b231df5;display:flex;align-items:center;gap:15px;justify-content:space-between;padding:15px 20px;border-bottom:1px solid var(--border)}.dialog-header h2{font-size:17px;overflow-wrap:anywhere}#detail{padding:20px}.detail-layout{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(260px,1fr);gap:22px}.preview-area{background:#101612;position:relative;min-height:180px;display:flex;align-items:center;justify-content:center}.crop-wrap{position:relative;line-height:0;max-width:100%}.crop-wrap img{display:block;max-width:100%;max-height:61vh;width:auto;height:auto}.crop-wrap svg{position:absolute;inset:0;width:100%;height:100%;pointer-events:none}.viewer-tools{display:flex;gap:15px;align-items:center;flex-wrap:wrap;margin:10px 0}.details-copy{min-width:0}.details-copy p{margin:9px 0}.details-copy dl,.candidate dl{font-size:12px;margin:12px 0}.metric-row{display:flex;gap:12px;justify-content:space-between;border-top:1px solid #344034;padding:5px 0}.metric-row dt{color:var(--muted)}.metric-row dd{margin:0;text-align:right;overflow-wrap:anywhere}.detail-links{display:flex;gap:15px;flex-wrap:wrap;margin-top:12px;font-size:12px}.candidate-list{display:grid;grid-template-columns:repeat(auto-fill,minmax(225px,1fr));gap:13px;margin-top:12px}.candidate{border:1px solid #43503e;background:#252e25;border-radius:9px;padding:10px;min-width:0}.candidate.focused{border-color:var(--accent)}.candidate .thumb{aspect-ratio:4/3;border-radius:5px}.candidate button{width:100%;padding:0;background:transparent;border:0;text-align:left}.candidate h3{margin-top:8px;overflow-wrap:anywhere}.candidate p{margin-top:7px;font-size:12px;overflow-wrap:anywhere}.candidate-section{margin-top:24px;padding-top:18px;border-top:1px solid var(--border)}.frame-empty{margin-top:12px;padding:12px;border:1px dashed #58634b;border-radius:7px}.model-copy{white-space:pre-wrap;overflow-wrap:anywhere}.sr-only{position:absolute;width:1px;height:1px;padding:0;margin:-1px;overflow:hidden;clip:rect(0,0,0,0);white-space:nowrap;border:0}
+    @media(min-width:1550px){.gallery{grid-template-columns:repeat(5,minmax(0,1fr))}}
+    @media(max-width:850px){.detail-layout{grid-template-columns:1fr}.toolbar{align-items:center}.tabs{width:100%}.crop-wrap img{max-height:53vh}.header-tools{gap:10px}#counts{margin-left:0}.gallery{grid-template-columns:repeat(auto-fill,minmax(210px,1fr))}}
+    @media(max-width:480px){header{padding:14px 16px;gap:10px}header h1{font-size:19px}main{padding:14px 16px}.header-tools{width:100%;justify-content:space-between}.gallery{grid-template-columns:1fr;gap:14px}.field{flex:1;min-width:130px}.field input,.field select{width:100%}.toolbar{gap:9px}.results-line{flex-wrap:wrap}dialog{width:98vw;max-height:97vh}.dialog-header,#detail{padding:13px}.pager{gap:9px}.candidate-list{grid-template-columns:1fr}}
+    body{padding:env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom) env(safe-area-inset-left)}
+    button,select,input[type="search"],summary{min-height:44px}button,input,select,a,summary{touch-action:manipulation}.check{min-height:44px}.tabs button{flex:1}
+    .header-tools a,.detail-links a,footer a{display:inline-flex;align-items:center;min-height:44px}
+    .progress-row span{min-width:0;overflow-wrap:anywhere}
+    .capture-summary,.capture-details{overflow-wrap:anywhere}.capture-summary{margin-top:9px;color:var(--muted);font-size:11px}.capture-details{margin-top:17px;border-top:1px solid var(--border);padding-top:12px}.capture-details a{display:inline-flex;align-items:center;min-height:44px}.capture-details .metric-row>*{min-width:0}
+    .shoot-filter{display:flex;align-items:center;flex-wrap:wrap;gap:8px 16px;margin-top:15px}.shoot-field{width:300px;max-width:100%;min-width:0}.shoot-field select{width:100%;min-width:0;text-overflow:ellipsis}#shoot-group-status{flex:1;min-width:200px;font-size:12px;color:var(--muted);overflow-wrap:anywhere}.shoot-group-label{color:var(--accent);overflow-wrap:anywhere}
+    .english-name{display:block;color:var(--muted);font-size:12px;overflow-wrap:anywhere}.dialog-header h2{flex:1;min-width:0}.dialog-actions{display:flex;align-items:center;gap:10px;margin-left:auto}.primary-action{display:inline-flex;align-items:center;justify-content:center;min-height:44px;background:var(--accent);color:#22301b;border-radius:7px;padding:8px 16px;font-weight:650;text-decoration:none;white-space:nowrap}.technical-details{margin-top:20px}.switch-control{display:inline-flex;align-items:center;gap:9px;min-height:44px;cursor:pointer;font-size:12px}.switch-control input{appearance:none;display:block;width:42px;height:24px;padding:0;border:1px solid #6b796b;background:#354137;border-radius:14px;position:relative;flex-shrink:0;cursor:inherit}.switch-control input::after{content:"";position:absolute;left:3px;top:3px;width:16px;height:16px;border-radius:50%;background:#c9d1c5;transition:transform .15s}.switch-control input:checked{background:#a6c76d;border-color:#a6c76d}.switch-control input:checked::after{background:#1b2c14;transform:translateX(18px)}.switch-control input:focus-visible{outline:2px solid var(--accent);outline-offset:4px}.switch-control:has(input:disabled){opacity:.45;cursor:default}
+    .original-toggle{position:absolute;right:10px;bottom:10px;z-index:1;display:flex;align-items:center;gap:6px;min-width:44px;min-height:44px;background:#172218e8;border-color:#b9cb9f;color:#e5efda;box-shadow:0 2px 8px #0007}.original-toggle[aria-pressed="true"]{background:var(--accent);color:#22301b}.original-toggle svg{width:19px;height:19px}.preview-status{font-size:12px;color:var(--muted);padding:7px 0;overflow-wrap:anywhere}.preview-status[role="alert"]{color:#efbca4}.crop-wrap img{cursor:zoom-in}
+    dialog.photo-viewer{inset:0;width:100%;height:100%;width:100dvw;height:100dvh;max-width:none;max-height:none;margin:0;border:0;border-radius:0;background:#080b09;overflow:hidden;padding:0;touch-action:none}.photo-stage{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;overflow:hidden;touch-action:none}.photo-stage img{display:block;max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;transform-origin:center;cursor:zoom-out;will-change:transform}.photo-toolbar{position:absolute;top:calc(env(safe-area-inset-top) + 10px);right:calc(env(safe-area-inset-right) + 12px);z-index:2;display:flex;gap:8px}.photo-hint{position:absolute;bottom:calc(env(safe-area-inset-bottom) + 14px);left:20px;right:20px;text-align:center;color:#e0e8d8;font-size:12px;pointer-events:none;text-shadow:0 1px 5px #000}
+    .photo-message{position:absolute;bottom:calc(env(safe-area-inset-bottom) + 52px);left:16px;right:16px;z-index:2;text-align:center;pointer-events:none;font-size:12px;color:#e0e8d8;text-shadow:0 1px 5px #000}.photo-message button{pointer-events:auto}.photo-message [role="alert"]{color:#ffd0b6}
+    .photo-toolbar button{min-width:44px}
+    dialog{position:fixed;inset:calc(env(safe-area-inset-top) + 8px) calc(env(safe-area-inset-right) + 6px) calc(env(safe-area-inset-bottom) + 8px) calc(env(safe-area-inset-left) + 6px);max-width:calc(100vw - env(safe-area-inset-left) - env(safe-area-inset-right) - 12px);max-height:calc(100dvh - env(safe-area-inset-top) - env(safe-area-inset-bottom) - 16px);overflow:auto;overscroll-behavior:contain}
+    html:has(dialog[open]){overflow:hidden}.crop-wrap img{max-height:55dvh}
+    details{border:1px solid var(--border);border-radius:7px;margin:9px 0;padding:0 10px}summary{cursor:pointer;padding:10px 0;color:var(--accent);font-size:12px}
+    dialog{border:0;background:#171e19}.dialog-header{display:grid;grid-template-columns:minmax(0,1fr) 44px;gap:8px;border:0;background:#171e19ee;backdrop-filter:blur(14px);padding:10px 16px}.dialog-heading{min-width:0}.dialog-header h2{font-size:17px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.dialog-source{font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.icon-button{width:44px;height:44px;padding:10px;border:0;background:transparent;color:#d4ded0;border-radius:50%}.icon-button:hover{background:#d1e4a014}.icon-button svg{width:24px;height:24px;display:block}
+    .image-controls{position:absolute;bottom:10px;right:10px;left:10px;z-index:1;display:flex;justify-content:flex-end;align-items:center;gap:6px;pointer-events:none}.image-controls>*{pointer-events:auto}.image-controls .original-toggle{position:static;box-shadow:none}.image-controls .original-toggle,.image-controls .switch-control{min-height:44px;margin:0;padding:7px 9px;border:1px solid #e0efcf26;border-radius:22px;background:#111b13b8;backdrop-filter:blur(10px);color:#e5efda;font-size:11px;gap:5px;line-height:1.2}.image-controls .switch-control:has(input:checked),.image-controls .original-toggle[aria-pressed="true"]{background:#bedb88e8;color:#213118;border-color:#d1e4a080}.image-controls .switch-control input{width:27px;height:16px;border:0;background:#e1ecd84d}.image-controls .switch-control input::after{width:12px;height:12px;left:2px;top:2px;background:#dce7d4}.image-controls .switch-control input:checked{background:#28451a80}.image-controls .switch-control input:checked::after{transform:translateX(11px);background:#203917}.image-controls .switch-control:has(input:disabled){opacity:.5}.preview-area{isolation:isolate}
+    .classification-details .species-candidates{grid-template-columns:repeat(3,minmax(0,1fr));gap:7px;align-items:start}.classification-details .species-candidate{min-width:0;padding:6px;border:1px solid rgb(184 214 141 / var(--candidate-border));border-radius:10px;background:rgb(166 199 109 / var(--candidate-alpha))}.classification-details .species-candidate strong{display:block;font-size:12px;line-height:1.45;margin-top:7px}.classification-details .english-name{font-size:10px;line-height:1.35;margin-top:3px}.classification-details .classification-score{font-size:13px;font-weight:650;color:#d9edb7;margin-top:7px}.reference-picture{position:relative;display:grid;place-items:center;aspect-ratio:1;background:#101912;border-radius:6px;overflow:hidden;color:var(--muted);font-size:10px;text-align:center}.reference-picture img{width:100%;height:100%;object-fit:contain;position:absolute;inset:0}.reference-placeholder{padding:9px}.reference-label{position:absolute;top:3px;left:3px;padding:1px 4px;background:#101a12ba;color:#d6e2ce;border-radius:3px;font-size:9px;pointer-events:none}.reference-links{font-size:10px;margin-top:4px;line-height:1.4}.reference-links>a{display:flex;align-items:center;min-height:44px}.reference-credit{margin:0;border:0;border-top:1px solid #b8d68d24;padding:0}.reference-credit summary{font-size:10px;padding:8px 0;min-height:36px;color:#c4d2bb}.reference-credit p,.reference-credit a{font-size:10px;overflow-wrap:anywhere}.reference-retry{font-size:10px;padding:4px 6px;width:100%;margin-top:5px}.reference-note{font-size:10px;color:var(--muted)}
+    @media(max-width:480px){.dialog-header{padding:8px 12px}.dialog-header h2{font-size:16px}.image-controls{bottom:8px;right:8px;left:8px;gap:5px}.image-controls .original-toggle,.image-controls .switch-control{padding:7px 8px}.classification-details .species-candidates{gap:6px}.classification-details .species-candidate{padding:5px}}
+    @media(prefers-reduced-motion:reduce){.switch-control input::after{transition:none}}
+  </style>
+</head>
+<body>
+  <header>
+    <span class="brand">BIRDSHOT</span><h1>优选鸟体</h1>
+    <div class="header-tools"><span id="status" class="status">读取索引中</span><button id="refresh" type="button">刷新</button></div>
+  </header>
+  <main>
+    <div class="progress-row"><span id="progress-label">等待本地验鸟索引</span><progress id="progress" max="1" value="0" aria-label="本地验鸟候选进度"></progress><span id="updated"></span><span id="counts"></span></div>
+    <p id="change-counts"></p>
+    <div id="notice" class="notice" role="status" hidden></div>
+    <div class="shoot-filter">
+      <label class="field shoot-field">地点 / 拍摄日期<select id="shoot-group" aria-describedby="shoot-group-status" disabled><option value="">全部拍摄组</option></select></label>
+      <p id="shoot-group-status" role="status">地点 / 日期目录尚未准备，仍可浏览全部裁剪。</p>
+    </div>
+    <div class="toolbar" aria-label="图墙筛选与排序">
+      <div class="tabs" role="tablist" aria-label="候选池">
+        <button id="preferred-tab" type="button" role="tab" aria-selected="true" aria-controls="gallery">优选鸟体</button>
+        <button id="review-tab" type="button" role="tab" aria-selected="false" aria-controls="gallery" tabindex="-1">独立审核</button>
+      </div>
+      <label class="field">查找鸟种或来源<input id="search" type="search" placeholder="鸟种、文件名、实例" maxlength="160"></label>
+      <label class="field">技术等级<select id="tier"><option value="">全部等级</option></select></label>
+      <label class="field" id="verification-field" hidden>审核类型<select id="verification"><option value="">全部未入选</option><option value="pending">验鸟未完成</option><option value="unknown">验鸟未知（不含未完成）</option><option value="nonBird">判为非鸟</option><option value="bird">已验鸟但未保留</option></select></label>
+      <label class="field">排序<select id="sort"><option value="rank">技术优先</option><option value="reverse">反向浏览</option></select></label>
+      <label class="check"><input id="collapse" type="checkbox">每个连拍组仅显示首项</label>
+    </div>
+    <section id="gallery" class="gallery" role="tabpanel" aria-labelledby="preferred-tab" aria-busy="true"></section>
+    <section id="empty" class="empty" hidden><h2 id="empty-title"></h2><p id="empty-message" class="muted"></p></section>
+    <nav id="pager" class="pager" aria-label="图墙分页" hidden><button id="previous" type="button">上一页</button><span id="page-label" aria-live="polite"></span><button id="next" type="button">下一页</button><label class="field"><span class="sr-only">每页数量</span><select id="page-size" aria-label="每页数量"><option value="24">24 项 / 页</option><option value="48" selected>48 项 / 页</option><option value="96">96 项 / 页</option></select></label></nav>
+    <footer>照片仅从当前本地报告服务读取，原图按需打开。</footer>
+  </main>
+  <dialog id="dialog" aria-labelledby="dialog-title">
+    <div class="dialog-header"><div class="dialog-heading"><h2 id="dialog-title">鸟体裁剪与组内对比</h2><p id="dialog-source" class="dialog-source"></p></div><button id="close" class="icon-button" type="button" aria-label="关闭" title="关闭详情" autofocus><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18"/></svg></button></div>
+    <div id="detail" aria-live="polite"></div>
+  </dialog>
+  <dialog id="photo-viewer" class="photo-viewer" aria-label="照片浏览">
+    <div id="photo-stage" class="photo-stage"></div>
+    <div class="photo-toolbar"><a id="photo-download" class="primary-action" download hidden>保存原图</a><button id="photo-zoom-out" type="button" aria-label="缩小照片">−</button><button id="photo-zoom-in" type="button" aria-label="放大照片">＋</button><button id="photo-exit" type="button" autofocus>返回详情</button></div>
+    <div class="photo-message"><p id="photo-status" role="status" aria-live="polite"></p><button id="photo-retry" type="button" hidden>重试清晰预览</button></div>
+    <p class="photo-hint">捏合缩放 · 单击返回 · 长按保存当前图，原文件用“保存原图”</p>
+  </dialog>
+  <script>
+    'use strict';
+    const $ = id => document.getElementById(id);
+    const el = (tag, className, text) => {
+      const node = document.createElement(tag);
+      if (className) node.className = className;
+      if (text !== undefined) node.textContent = String(text);
+      return node;
+    };
+    const state = { index: null, shootGroups: new Map(), pool: 'preferred', page: 1, timer: null, request: null, detailRequest: null, referenceRequest: null, active: null, preview: null, photo: null, ignorePreviewClickUntil: 0 };
+    // Same six candidate points as CullingApp.tsx; these are not visibility labels or a skeleton.
+    const poseLabels = ['喙', '左眼', '右眼', '头顶', '左肩部', '右肩部'];
+    const number = value => typeof value === 'number' && Number.isFinite(value);
+    const printable = value => value === undefined || value === null || value === '' ? '未提供' : String(value);
+    const format = value => number(value) ? value.toLocaleString('zh-CN', { maximumFractionDigits: 2 }) : '未判定';
+    const percent = value => number(value) && value >= 0 && value <= 1 ? (value * 100).toFixed(1) + '%' : '未判定';
+    const isPreferred = item => item.decision === 'keep' && item.birdVerification?.status === 'bird';
+    const hasRank = item => number(item.rank) && item.rank > 0;
+    function incompleteVerification(verification) {
+      if (verification?.status !== 'unknown' || verification.evidence?.status === 'completed') return false;
+      return ['pending', 'processing', 'running', 'failed', 'error'].includes(verification.evidence?.status) ||
+        (!verification.evidence && /尚未|未完成|未处理|等待|失败/.test(verification.reason || ''));
+    }
+    function verificationLabel(verification) {
+      if (verification?.status === 'unknown') {
+        return incompleteVerification(verification) ? '待识别' : '待确认';
+      }
+      return ({ bird: '鸟类候选', nonBird: '非鸟' })[verification?.status] || '未识别';
+    }
+    const badgeClass = value => value === 'bird' ? 'badge' : value === 'nonBird' ? 'badge nonbird' : 'badge review';
+    const hasName = value => typeof value === 'string' && value.trim().length > 0;
+    const qualityLabel = quality => ({ '高可用原像素': '高像素', '标准可用原像素': '标准像素', '原图触边风险': '触边风险', '低像素细节受限': '低像素' })[quality?.tierLabel] || quality?.tierLabel || '未分级';
+    function speciesCandidates(species) {
+      const candidates = Array.isArray(species?.top3) ? species.top3 : species?.top5;
+      return (Array.isArray(candidates) ? candidates : []).slice(0, 3).filter(candidate => candidate && (candidate.isBird === false || hasName(candidate.commonName) || hasName(candidate.englishName) || hasName(candidate.scientificName)));
+    }
+    const speciesLabel = species => {
+      const first = speciesCandidates(species)[0];
+      if (first?.isBird === false) return '非鸟类别候选';
+      return first ? hasName(first.commonName) ? first.commonName : '中文名待补' : '鸟种未知';
+    };
+    function classificationScores(candidate) {
+      return number(candidate.probability) && candidate.probability >= 0 && candidate.probability <= 1 ?
+        '概率 ' + (candidate.probability * 100).toLocaleString('zh-CN', { maximumSignificantDigits: 4 }) + '%' : '概率未提供';
+    }
+    function captureTime(capture, compact) {
+      if (!hasName(capture.time)) return { text: '未记录拍摄时间', zone: '' };
+      const parts = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?(Z|[+-]\d{2}:\d{2})?$/i.exec(capture.time.trim());
+      if (!parts) return { text: '拍摄时间格式无效', zone: '' };
+      const [, year, month, day, hour, minute, second, suffix] = parts;
+      if (Number(year) < 100 || Number(month) < 1 || Number(month) > 12 || Number(day) < 1 ||
+        Number(day) > new Date(Date.UTC(Number(year), Number(month), 0)).getUTCDate() ||
+        Number(hour) > 23 || Number(minute) > 59 || Number(second || 0) > 59) return { text: '拍摄时间格式无效', zone: '' };
+      const offset = suffix || (/^[+-]\d{2}:\d{2}$/.test(capture.timeZone || '') ? capture.timeZone : ['UTC', 'Z'].includes(capture.timeZone) ? 'Z' : null);
+      if (offset) {
+        const instant = new Date(year + '-' + month + '-' + day + 'T' + hour + ':' + minute + ':' + (second || '00') + offset);
+        if (!Number.isFinite(instant.getTime())) return { text: '拍摄时间格式无效', zone: '' };
+        const options = { timeZone: 'Asia/Shanghai', year: 'numeric', month: 'long', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' };
+        if (!compact && second) options.second = '2-digit';
+        return { text: new Intl.DateTimeFormat('zh-CN', options).format(instant), zone: '北京时间' };
+      }
+      return { text: Number(year) + '年' + Number(month) + '月' + Number(day) + '日 ' + hour + ':' + minute + (!compact && second ? ':' + second : ''), zone: '相机时间，时区未记录' };
+    }
+    function validLocation(location) {
+      return location?.crs === 'WGS84' && location.source === 'exif-gps' &&
+        number(location.latitude) && Math.abs(location.latitude) <= 90 &&
+        number(location.longitude) && Math.abs(location.longitude) <= 180;
+    }
+    function locationText(location) {
+      const degrees = value => Math.abs(value).toLocaleString('zh-CN', { maximumFractionDigits: 6 }) + '°';
+      return (location.latitude < 0 ? '南纬 ' : '北纬 ') + degrees(location.latitude) + ' · ' +
+        (location.longitude < 0 ? '西经 ' : '东经 ') + degrees(location.longitude);
+    }
+    function captureDetails(capture, compact = false, shootGroup) {
+      const section = el('section', compact ? 'capture-summary' : 'capture-details');
+      if (!compact) section.append(el('h3', '', '拍摄时间与地点'));
+      if (hasName(shootGroup?.name)) section.append(el('p', 'shoot-group-label', '拍摄组：' + shootGroup.name));
+      if (!capture || capture.status === 'pending') {
+        section.append(el('p', '', '拍摄元数据尚未读取；时间与位置待确认。'));
+        return section;
+      }
+      if (capture.status === 'error') {
+        section.append(el('p', '', '拍摄元数据读取失败；不能判定是否记录时间或位置。'));
+        if (!compact && hasName(capture.locationNote)) section.append(el('p', 'muted', capture.locationNote));
+        return section;
+      }
+      if (capture.status !== 'ready') {
+        section.append(el('p', '', '拍摄元数据状态无效；未展示未经确认的时间或位置。'));
+        return section;
+      }
+      const time = captureTime(capture, compact);
+      const location = capture.location === null || capture.location === undefined ? '未记录位置' :
+        validLocation(capture.location) ? locationText(capture.location) : '位置数据无效或非 EXIF WGS84；不生成地图定位';
+      const place = hasName(capture.placeName) ? capture.placeName : hasName(shootGroup?.placeName) ? shootGroup.placeName : '未知地点';
+      if (compact) {
+        section.append(el('p', '', '拍摄：' + time.text + (time.zone ? '（' + time.zone + '）' : '')), el('p', '', '地点：' + place));
+        if (place === '未知地点' || capture.location) section.append(el('p', '', location));
+        return section;
+      }
+      const list = el('dl');
+      addMetric(list, '拍摄时间', time.text);
+      if (time.zone) addMetric(list, '时间说明', time.zone);
+      if (hasName(shootGroup?.name)) addMetric(list, '拍摄组日期（相机日期）', hasName(shootGroup.date) ? shootGroup.date : '日期未知');
+      addMetric(list, '大致地点', place);
+      addMetric(list, 'GPS 位置', location);
+      if (validLocation(capture.location)) addMetric(list, '位置来源 / 坐标系', 'EXIF GPS · WGS84');
+      section.append(list);
+      if (validLocation(capture.location)) {
+        section.append(el('p', 'muted', '打开外部地图会向地图服务发送此位置。'));
+        const { latitude, longitude } = capture.location;
+        const link = externalLink('在地图查看（将打开外部地图）', 'https://www.openstreetmap.org/?mlat=' + latitude + '&mlon=' + longitude + '#map=16/' + latitude + '/' + longitude);
+        link.rel = 'noopener noreferrer';
+        link.referrerPolicy = 'no-referrer';
+        section.append(link);
+      }
+      return section;
+    }
+    function updateShootGroups() {
+      const select = $('shoot-group'), selected = select.value, groups = state.index?.shootGroups;
+      state.shootGroups.clear();
+      const all = el('option', '', '全部拍摄组'); all.value = '';
+      select.replaceChildren(all);
+      select.disabled = true;
+      let message = '';
+      if (groups === undefined || groups === null) message = '地点 / 日期目录尚未准备，仍可浏览全部裁剪。';
+      else if (!Array.isArray(groups) || groups.some(group => !group || !hasName(group.id) || !hasName(group.name) ||
+        ![null, undefined].includes(group.date) && !hasName(group.date) ||
+        ![null, undefined].includes(group.placeName) && !hasName(group.placeName) ||
+        ['photoCount', 'cropCount', 'preferredCount'].some(key => !Number.isInteger(group[key]) || group[key] < 0)) ||
+        new Set(groups.map(group => group.id)).size !== groups.length) {
+        message = '地点 / 日期目录格式无效，暂不启用分组筛选；仍可浏览全部裁剪。';
+      } else {
+        for (const group of groups) {
+          state.shootGroups.set(group.id, group);
+          const option = el('option', '', group.name + ' · 优选 ' + format(group.preferredCount));
+          option.value = group.id; select.append(option);
+        }
+        select.disabled = !groups.length;
+        if (state.shootGroups.has(selected)) select.value = selected;
+      }
+      if (selected && !state.shootGroups.has(selected)) state.page = 1;
+      $('shoot-group-status').setAttribute('role', message.includes('无效') ? 'alert' : 'status');
+      $('shoot-group-status').dataset.notice = message;
+      updateShootGroupStatus();
+    }
+    function updateShootGroupStatus() {
+      const group = state.shootGroups.get($('shoot-group').value);
+      $('shoot-group-status').textContent = $('shoot-group-status').dataset.notice || (group ?
+        group.name + ' · 原图 ' + format(group.photoCount) + ' · 裁剪 ' + format(group.cropCount) + ' · 优选 ' + format(group.preferredCount) + '（目录计数）' :
+        '全部拍摄组 · ' + format(state.shootGroups.size) + ' 组；按地点与相机日期分组，不改变连拍与技术判断。');
+    }
+    function media(path) {
+      if (typeof path !== 'string' || !path || path.includes('\\') || /[:\p{Cc}]/u.test(path)) throw new Error('裁剪媒体路径不是有效的本机相对路径');
+      const parts = path.split('/');
+      if (parts.some(part => !part || part === '.' || part === '..')) throw new Error('裁剪媒体路径不能越过输出目录');
+      if (!/\.(jpe?g|png)$/i.test(path)) throw new Error('仅允许已有的 JPEG / PNG 派生裁剪');
+      return '/media/' + parts.map(encodeURIComponent).join('/');
+    }
+    function groupUrl(id) {
+      if (typeof id !== 'string' || !/^g\d{5}$/.test(id)) throw new Error('组标识无效');
+      return '/gallery/group/' + encodeURIComponent(id) + '.json';
+    }
+    async function json(url, signal) {
+      const response = await fetch(url, { cache: 'no-store', credentials: 'same-origin', signal, redirect: 'error' });
+      if (!response.ok) throw new Error(url + ' 读取失败（HTTP ' + response.status + '）');
+      try { return await response.json(); }
+      catch (error) { throw new Error(url + ' 不是有效 JSON：' + error.message); }
+    }
+    function validateIndex(data) {
+      if (!data || data.version !== 1) throw new Error('不支持的优选索引版本（需要 version: 1）');
+      if (!['processing', 'completed', 'error'].includes(data.status)) throw new Error('优选索引状态无效');
+      if (typeof data.updatedAt !== 'string' || !Number.isFinite(Date.parse(data.updatedAt))) throw new Error('索引更新时间无效');
+      if (!data.progress || !Number.isInteger(data.progress.processed) || !Number.isInteger(data.progress.total) ||
+        data.progress.processed < 0 || data.progress.total < data.progress.processed) throw new Error('候选进度计数无效');
+      if (!data.summary || !Array.isArray(data.items)) throw new Error('索引缺少 summary 或 items');
+      for (const key of ['preferred', 'bird', 'nonBird', 'unknown', 'oldSelected', 'removedOld', 'addedNew']) {
+        if (!Number.isInteger(data.summary[key]) || data.summary[key] < 0) throw new Error('索引计数无效：' + key);
+      }
+      if (data.summary.pending !== undefined && (!Number.isInteger(data.summary.pending) || data.summary.pending < 0)) throw new Error('待处理计数无效');
+      const ids = new Set();
+      for (const item of data.items) {
+        if (!item || typeof item.id !== 'string' || !item.id || ids.has(item.id)) throw new Error('索引项标识缺失或重复');
+        ids.add(item.id);
+        groupUrl(item.groupId);
+        if (typeof item.frameId !== 'string' || !item.frameId || !['string', 'number'].includes(typeof item.instanceId)) throw new Error('索引项缺少来源实例标识');
+        if (!['bird', 'nonBird', 'unknown'].includes(item.birdVerification?.status)) throw new Error('索引项缺少明确的本地验鸟状态');
+        if (!['keep', 'review', 'reject'].includes(item.decision)) throw new Error('索引项决策无效');
+        if (isPreferred(item) && !hasRank(item)) throw new Error('优选项缺少有效的技术名次');
+        if (typeof item.sourceLabel !== 'string' || typeof item.reason !== 'string' || !item.reason) throw new Error('索引项缺少来源或决策依据');
+        media(item.crop);
+        media(item.thumbnail);
+      }
+      if (data.summary.preferred !== data.items.filter(isPreferred).length) throw new Error('优选计数与已验鸟保留索引不一致');
+      return data;
+    }
+    function setNotice(message, error = false) {
+      $('notice').hidden = !message;
+      $('notice').className = 'notice' + (error ? ' error' : '');
+      $('notice').setAttribute('role', error ? 'alert' : 'status');
+      $('notice').textContent = message;
+    }
+    function updateSummary() {
+      const data = state.index, summary = data.summary;
+      $('status').textContent = ({ processing: '本地处理中', completed: '索引已完成', error: '索引处理出错' })[data.status];
+      $('progress-label').textContent = '已处理候选 ' + format(data.progress.processed) + ' / ' + format(data.progress.total) + ' · 待处理 ' + format(data.summary.pending ?? (data.progress.total - data.progress.processed));
+      $('progress').max = data.progress.total || 1;
+      $('progress').value = data.progress.processed;
+      $('updated').textContent = '更新于 ' + new Date(data.updatedAt).toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
+      $('counts').textContent = '优选 ' + format(summary.preferred) + ' · 已验鸟 ' + format(summary.bird) + ' · 非鸟 ' + format(summary.nonBird) + (summary.pending === undefined ? ' · 未知/未确认 ' : ' · 已处理未知 ') + format(summary.unknown);
+      $('change-counts').textContent = '旧版保留 ' + format(summary.oldSelected) + ' · 新版移出 ' + format(summary.removedOld) + ' · 新增 ' + format(summary.addedNew) + '（均为索引计数，不改写旧报告）';
+      const selectedTier = $('tier').value;
+      const tiers = new Map();
+      for (const item of data.items) {
+        if (item.quality?.tier !== undefined) tiers.set(String(item.quality.tier), qualityLabel(item.quality));
+      }
+      $('tier').replaceChildren(el('option', '', '全部等级'));
+      $('tier').firstChild.value = '';
+      for (const [value, label] of tiers) { const option = el('option', '', label); option.value = value; $('tier').append(option); }
+      if (tiers.has(selectedTier)) $('tier').value = selectedTier;
+      updateShootGroups();
+    }
+    function filteredItems(pool = state.pool) {
+      const query = $('search').value.trim().toLocaleLowerCase();
+      let items = state.index.items.filter(item => pool === 'preferred' ? isPreferred(item) : !isPreferred(item));
+      if ($('shoot-group').value) items = items.filter(item => item.shootGroup?.id === $('shoot-group').value);
+      if ($('tier').value) items = items.filter(item => String(item.quality?.tier) === $('tier').value);
+      if (pool === 'review' && $('verification').value) items = items.filter(item => $('verification').value === 'pending' ? incompleteVerification(item.birdVerification) :
+        item.birdVerification.status === $('verification').value && !incompleteVerification(item.birdVerification));
+      if (query) items = items.filter(item => [item.sourceLabel, item.id, String(item.instanceId), ...speciesCandidates(item.species).flatMap(species => [species.commonName, species.englishName, species.scientificName])].filter(Boolean).join(' ').toLocaleLowerCase().includes(query));
+      items = items.toSorted((a, b) => {
+        if (hasRank(a) !== hasRank(b)) return hasRank(a) ? -1 : 1;
+        if (!hasRank(a)) return 0;
+        return $('sort').value === 'reverse' ? b.rank - a.rank : a.rank - b.rank;
+      });
+      if ($('collapse').checked) {
+        const seen = new Set();
+        items = items.filter(item => { if (seen.has(item.groupId)) return false; seen.add(item.groupId); return true; });
+      }
+      return items;
+    }
+    function imageBox(path, alt) {
+      const box = el('div', 'thumb'), image = el('img');
+      image.alt = alt;
+      image.loading = 'lazy';
+      image.decoding = 'async';
+      image.addEventListener('error', () => { image.remove(); box.append(el('span', 'image-error', '裁剪图读取失败；未用原图替代')); }, { once: true });
+      image.src = media(path);
+      box.append(image);
+      return box;
+    }
+    function tile(item) {
+      const card = el('article', 'tile'), button = el('button', 'tile-open');
+      button.type = 'button';
+      button.dataset.itemId = item.id;
+      button.setAttribute('aria-label', speciesLabel(item.species) + '，' + item.sourceLabel + '，查看裁剪与组内对比');
+      const name = isPreferred(item) ? speciesLabel(item.species) : verificationLabel(item.birdVerification);
+      button.append(imageBox(item.thumbnail, name + ' · ' + item.sourceLabel));
+      const info = el('div', 'tile-info'), heading = el('div', 'tile-heading');
+      heading.append(el('span', 'species', name), el('span', 'rank', hasRank(item) ? '#' + format(item.rank) : '未排名'));
+      const badges = el('div', 'badges');
+      badges.append(el('span', badgeClass(item.birdVerification.status), verificationLabel(item.birdVerification)));
+      badges.append(el('span', 'badge review', qualityLabel(item.quality)));
+      if (item.quality?.representative) badges.append(el('span', 'badge', '连拍代表'));
+      info.append(heading, badges, speciesDetails(item.species, true));
+      info.append(el('p', 'source', item.sourceLabel + ' · 实例 ' + item.instanceId));
+      info.append(captureDetails(item.capture, true, item.shootGroup));
+      button.append(info);
+      button.addEventListener('click', () => openDetail(item));
+      card.append(button);
+      return card;
+    }
+    function render() {
+      if (!state.index) return;
+      const preferred = filteredItems('preferred'), review = filteredItems('review');
+      $('preferred-tab').textContent = '优选鸟体 ' + format(preferred.length);
+      $('review-tab').textContent = '独立审核 ' + format(review.length);
+      const items = state.pool === 'preferred' ? preferred : review, pageSize = Number($('page-size').value), pages = Math.max(1, Math.ceil(items.length / pageSize));
+      state.page = Math.max(1, Math.min(state.page, pages));
+      $('gallery').replaceChildren(...items.slice((state.page - 1) * pageSize, state.page * pageSize).map(tile));
+      $('gallery').setAttribute('aria-busy', 'false');
+      updateShootGroupStatus();
+      $('empty').hidden = items.length > 0;
+      $('pager').hidden = items.length === 0;
+      $('previous').disabled = state.page === 1;
+      $('next').disabled = state.page === pages;
+      $('page-label').textContent = state.page + ' / ' + pages + ' 页';
+      if (!items.length) {
+        const hasFilter = $('shoot-group').value || $('search').value || $('tier').value || (state.pool === 'review' && $('verification').value);
+        $('empty-title').textContent = hasFilter ? '没有符合筛选的裁剪' : state.index.status === 'processing' ? '等待本地验鸟结果' : state.pool === 'preferred' ? '尚无通过验鸟并保留的鸟体' : '当前没有可审核项';
+        $('empty-message').textContent = hasFilter ? '调整拍摄组、鸟种、来源或技术等级筛选后重试。' : state.index.status === 'processing' ? '已处理的合格裁剪会逐步出现在这里。旧版保留不会自动当作已验鸟。' : '仅展示新版索引明确提供的结果；未检出鸟体时不以背景或原图补位。';
+      }
+    }
+    async function refresh() {
+      clearTimeout(state.timer);
+      if (state.request) state.request.abort();
+      const controller = new AbortController();
+      state.request = controller;
+      $('refresh').disabled = true;
+      $('gallery').setAttribute('aria-busy', 'true');
+      if (state.index) $('status').textContent = '正在刷新索引';
+      try {
+        if (!['http:', 'https:'].includes(location.protocol)) throw new Error('请通过本地报告 HTTP(S) 服务打开页面');
+        const data = validateIndex(await json('/gallery.json', controller.signal));
+        if (controller.signal.aborted) return;
+        state.index = data;
+        updateSummary();
+        setNotice(data.status === 'error' ? '本地验鸟或质量索引处理失败。下方仅为该版索引已写入的部分结果，并非全量完成；请查看处理日志后刷新。' : '', data.status === 'error');
+        render();
+        if (data.status === 'processing') state.timer = setTimeout(refresh, 10000);
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        state.index = null;
+        updateShootGroups();
+        $('gallery').replaceChildren();
+        $('gallery').setAttribute('aria-busy', 'false');
+        $('pager').hidden = true;
+        $('empty').hidden = false;
+        $('empty-title').textContent = '优选索引不可用';
+        $('empty-message').textContent = '未加载旧版保留项。确认新版索引生成与本机服务后，点击刷新。';
+        $('status').textContent = '索引读取失败';
+        $('counts').textContent = '';
+        $('updated').textContent = '';
+        $('change-counts').textContent = '';
+        $('progress-label').textContent = '当前进度未知';
+        $('progress').value = 0;
+        $('preferred-tab').textContent = '优选鸟体';
+        $('review-tab').textContent = '独立审核';
+        setNotice(error.message, true);
+      } finally {
+        if (state.request === controller) { $('refresh').disabled = false; state.request = null; }
+      }
+    }
+    function switchPool(pool, focus = false) {
+      state.pool = pool;
+      state.page = 1;
+      for (const name of ['preferred', 'review']) {
+        const tab = $(name + '-tab');
+        tab.setAttribute('aria-selected', String(name === pool));
+        tab.tabIndex = name === pool ? 0 : -1;
+        if (focus && name === pool) tab.focus();
+      }
+      $('gallery').setAttribute('aria-labelledby', pool + '-tab');
+      $('verification-field').hidden = pool !== 'review';
+      render();
+    }
+    function addMetric(list, label, value) {
+      const row = el('div', 'metric-row');
+      row.append(el('dt', '', label), el('dd', '', value));
+      list.append(row);
+    }
+    function metrics(bird, quality) {
+      const dl = el('dl');
+      addMetric(dl, '技术等级', qualityLabel(quality));
+      addMetric(dl, '同对象组内名次', number(quality?.withinGroupRank) ? quality.withinGroupRank + ' / ' + format(quality.cohortSize) : '未提供可比名次');
+      addMetric(dl, '同对象相对主体指标', percent(quality?.withinGroupRelative));
+      addMetric(dl, '分割主体有效像素', format(quality?.bodyPixels ?? bird.bodyPixels));
+      addMetric(dl, '主体内部梯度（原始值）', format(quality?.bodyTenengrad ?? bird.bodySharpness));
+      addMetric(dl, '边缘 / 完整性风险', quality?.edgeRisk === false ? '未发现触边风险' : quality?.edgeRisk === true ? '存在触边风险' : printable(quality?.edgeRisk));
+      addMetric(dl, '检测置信度（非质量）', percent(bird.bodyConfidence));
+      addMetric(dl, '候选跨帧对象', bird.trackId === null || bird.trackId === undefined ? '未匹配' : String(bird.trackId));
+      if (Array.isArray(bird.cropRect)) addMetric(dl, '原像素裁剪尺寸', bird.cropRect.slice(2).map(format).join(' × '));
+      return dl;
+    }
+    function speciesDetails(species, compact = false, signal) {
+      const section = el('section', compact ? 'compact-classification' : 'classification-details');
+      const candidates = speciesCandidates(species);
+      if (!compact) section.append(el('h3', '', '分类候选'));
+      if (!candidates.length) section.append(el('p', 'muted', '鸟种未知；没有可展示的有效鸟种候选。'));
+      const list = el('div', 'species-candidates');
+      const references = new Map();
+      const ordered = compact ? candidates : [...candidates].sort((a, b) => (number(b.probability) ? b.probability : -1) - (number(a.probability) ? a.probability : -1));
+      for (const [index, candidate] of ordered.entries()) {
+        const row = el('div', 'species-candidate');
+        if (!compact) {
+          const probability = number(candidate.probability) ? Math.max(0, Math.min(1, candidate.probability)) : 0;
+          row.style.setProperty('--candidate-alpha', String(.06 + .3 * probability));
+          row.style.setProperty('--candidate-border', String(.18 + .5 * probability));
+          const picture = el('div', 'reference-picture'), links = el('div', 'reference-links');
+          picture.append(el('span', 'reference-placeholder', candidate.isBird === false ? '非鸟候选' : '参考图加载中'), el('span', 'reference-label', '参考图'));
+          row.append(picture);
+          row.append(links);
+          const name = candidate.scientificName?.trim();
+          if (candidate.isBird !== false && hasName(name)) {
+            const key = name.toLowerCase();
+            if (!references.has(key)) references.set(key, { name, targets: [] });
+            references.get(key).targets.push({ picture, links, candidate });
+          } else picture.querySelector('.reference-placeholder').textContent = '暂无参考图';
+        }
+        if (candidate.isBird === false) {
+          row.append(el('strong', 'badge nonbird', (index + 1) + '. 非鸟类别'));
+        } else {
+          row.append(el('strong', '', (index + 1) + '. ' + (hasName(candidate.commonName) ? candidate.commonName : '中文名待补')));
+        }
+        row.append(el('span', 'english-name', hasName(candidate.englishName) ? candidate.englishName : '英文名待补'));
+        row.append(el('span', 'classification-score', classificationScores(candidate)));
+        if (!compact) row.append(row.querySelector('.reference-links'));
+        list.append(row);
+      }
+      section.append(list);
+      if (!compact && signal) for (const reference of references.values()) loadReferences(reference, section, signal);
+      return section;
+    }
+    function publicReferenceUrl(value, hosts) {
+      const url = new URL(value);
+      if (url.protocol !== 'https:' || !hosts.includes(url.hostname) || url.username || url.password || (url.port && url.port !== '443')) throw new Error('公开参考链接来源无效');
+      return url.href;
+    }
+    async function loadReferences(reference, section, signal) {
+      const valid = () => !signal.aborted && section.isConnected;
+      try {
+        const response = await fetch('/species-reference?scientificName=' + encodeURIComponent(reference.name), { signal, credentials: 'same-origin' });
+        const result = await response.json();
+        if (!valid()) return;
+        if (!response.ok || result.status === 'error') throw new Error(result.message || '公开参考资料暂不可用');
+        if (result.scientificName?.toLowerCase() !== reference.name.toLowerCase() || !['ready', 'notFound'].includes(result.status)) throw new Error('公开参考物种不匹配');
+        const articleUrl = result.article ? publicReferenceUrl(result.article.url, ['zh.wikipedia.org', 'en.wikipedia.org']) : null;
+        const image = result.image;
+        if (image && (!/^\/species-media\/[a-f0-9]{64}\.jpg$/.test(image.url) || !hasName(image.author) || !hasName(image.license))) throw new Error('参考图登记或署名缺失');
+        const sourceUrl = image ? publicReferenceUrl(image.sourceUrl, ['commons.wikimedia.org']) : null;
+        const licenseUrl = image ? publicReferenceUrl(image.licenseUrl, ['creativecommons.org', 'commons.wikimedia.org']) : null;
+        for (const target of reference.targets) {
+          const { picture, links, candidate } = target;
+          picture.replaceChildren();
+          if (image) {
+            const img = el('img');
+            img.alt = (candidate.commonName || candidate.englishName || '物种') + ' · 公开参考图';
+            img.decoding = 'async';
+            img.addEventListener('error', () => { img.remove(); picture.prepend(el('span', 'reference-placeholder', '参考图加载失败')); }, { once: true });
+            img.src = image.url;
+            picture.append(img);
+          } else picture.append(el('span', 'reference-placeholder', result.status === 'notFound' ? '暂无准确条目' : '暂无授权参考图'));
+          picture.append(el('span', 'reference-label', '参考图'));
+          links.replaceChildren();
+          if (articleUrl) {
+            const link = externalLink('百科 ↗', articleUrl);
+            link.title = result.article.title;
+            link.setAttribute('aria-label', (candidate.commonName || candidate.englishName || '候选鸟种') + ' · ' + result.article.title + '百科');
+            links.append(link);
+          } else links.append(el('span', 'reference-note', '百科条目暂缺'));
+          if (image) {
+            const credit = el('details', 'reference-credit');
+            credit.append(el('summary', '', '署名许可'), el('p', '', image.author), externalLink(image.license, licenseUrl), document.createTextNode(' · '), externalLink('原始图页', sourceUrl), el('p', '', '缩略、JPEG重编码；仅为物种参考，非本次分类确认。'));
+            links.append(credit);
+          }
+        }
+      } catch (error) {
+        if (!valid()) return;
+        console.warn('公开物种参考暂不可用', reference.name, error.message);
+        for (const { picture, links } of reference.targets) {
+          picture.replaceChildren(el('span', 'reference-placeholder', '参考资料暂不可用'), el('span', 'reference-label', '参考图'));
+          const retry = el('button', 'reference-retry', '稍后重试');
+          retry.type = 'button';
+          retry.addEventListener('click', () => { retry.disabled = true; loadReferences(reference, section, signal); });
+          links.replaceChildren(retry);
+        }
+      }
+    }
+    function externalLink(text, href) {
+      const link = el('a', '', text);
+      link.href = href; link.target = '_blank'; link.rel = 'noopener';
+      return link;
+    }
+    function indexedItem(frame, bird) {
+      return state.index?.items.find(item => item.groupId === state.active.groupId && item.frameId === frame.id && String(item.instanceId) === String(bird.id));
+    }
+    function candidateMetadata(frame, bird) {
+      const item = indexedItem(frame, bird);
+      const captureItem = item?.capture ? item : state.index?.items.find(candidate => candidate.groupId === state.active.groupId && candidate.frameId === frame.id && candidate.capture);
+      const shootGroupItem = item?.shootGroup ? item : state.index?.items.find(candidate => candidate.groupId === state.active.groupId && candidate.frameId === frame.id && candidate.shootGroup);
+      return {
+        item,
+        birdVerification: item?.birdVerification || bird.birdVerification,
+        species: item?.species || bird.species,
+        quality: item?.quality || bird.quality,
+        capture: frame.capture ?? captureItem?.capture,
+        shootGroup: frame.shootGroup ?? shootGroupItem?.shootGroup,
+        decision: item?.decision || bird.decision,
+        reason: item?.reason || bird.reason || bird.selectionReason || '新版尚未提供此实例的入选 / 未选依据；旧帧级决策不能替代实例判定。'
+      };
+    }
+    function drawOverlay(svg, bird, showMask, showPose, frame, original = false) {
+      svg.replaceChildren();
+      const rect = original ? [0, 0, frame.width, frame.height] : bird.cropRect;
+      if (!Array.isArray(rect) || rect.length !== 4 || !rect.every(number) || rect[2] <= 0 || rect[3] <= 0) return false;
+      svg.setAttribute('viewBox', rect.join(' '));
+      const ns = 'http://www.w3.org/2000/svg', width = rect[2];
+      if (showMask && typeof bird.mask?.path === 'string') {
+        const path = document.createElementNS(ns, 'path');
+        path.setAttribute('d', bird.mask.path); path.setAttribute('fill', '#d2ea9c'); path.setAttribute('fill-opacity', '.15');
+        path.setAttribute('stroke', '#d2ea9c'); path.setAttribute('stroke-width', Math.max(1, width / 240)); path.setAttribute('fill-rule', 'evenodd');
+        path.dataset.instanceMask = ''; svg.append(path);
+      }
+      if (showPose) for (const point of bird.posePoints || []) {
+        if (!number(point.x) || !number(point.y) || !number(point.confidence) || point.confidence < .65 || !Number.isInteger(point.index) || point.index < 0 || point.index >= poseLabels.length) continue;
+        const circle = document.createElementNS(ns, 'circle');
+        circle.setAttribute('cx', point.x); circle.setAttribute('cy', point.y); circle.setAttribute('r', Math.max(2, width / 100)); circle.setAttribute('fill', '#ffbc87');
+        circle.dataset.posePoint = ''; svg.append(circle);
+        const text = document.createElementNS(ns, 'text');
+        text.setAttribute('x', point.x + width / 70); text.setAttribute('y', point.y); text.setAttribute('font-size', Math.max(8, width / 35));
+        text.setAttribute('fill', '#ffbc87'); text.setAttribute('stroke', '#142315'); text.setAttribute('stroke-width', Math.max(.4, width / 700)); text.setAttribute('paint-order', 'stroke');
+        text.textContent = poseLabels[point.index] + '候选 ' + percent(point.confidence); svg.append(text);
+      }
+      return true;
+    }
+    function closePhoto() {
+      if ($('photo-viewer').open) $('photo-viewer').close();
+    }
+    function sizePreviewImage(preview, image, mode, fullscreen = false) {
+      const sourceWidth = mode === 'original' ? preview.frame.width : preview.bird.cropRect?.[2] || image.naturalWidth;
+      const sourceHeight = mode === 'original' ? preview.frame.height : preview.bird.cropRect?.[3] || image.naturalHeight;
+      const width = fullscreen ? $('photo-stage').clientWidth : preview.area.clientWidth;
+      const height = fullscreen ? $('photo-stage').clientHeight : innerHeight * .55;
+      const fit = Math.min(width / sourceWidth, height / sourceHeight, 1);
+      if (!number(fit) || fit <= 0) return null;
+      const geometry = { width: sourceWidth * fit, height: sourceHeight * fit, sourceWidth, sourceHeight };
+      image.style.width = geometry.width + 'px'; image.style.height = geometry.height + 'px';
+      return geometry;
+    }
+    function transformPhoto() {
+      const photo = state.photo;
+      if (!photo) return;
+      photo.scale = Math.max(1, Math.min(photo.maxScale || 8, photo.scale));
+      const maxX = Math.max(0, (photo.image.clientWidth * photo.scale - $('photo-stage').clientWidth) / 2);
+      const maxY = Math.max(0, (photo.image.clientHeight * photo.scale - $('photo-stage').clientHeight) / 2);
+      photo.x = Math.max(-maxX, Math.min(maxX, photo.x));
+      photo.y = Math.max(-maxY, Math.min(maxY, photo.y));
+      photo.image.style.transform = 'translate3d(' + photo.x + 'px,' + photo.y + 'px,0) scale(' + photo.scale + ')';
+    }
+    function openPhoto(preview) {
+      if (state.preview !== preview || preview.loading || !preview.current || performance.now() < state.ignorePreviewClickUntil || $('photo-viewer').open) return;
+      state.photo = { preview, image: preview.current, scale: 1, x: 0, y: 0, pointers: new Map(), moved: false, multi: false, suppressTapUntil: 0, scroll: $('dialog').scrollTop };
+      $('photo-stage').replaceChildren(preview.current);
+      $('photo-viewer').showModal();
+      const geometry = sizePreviewImage(preview, preview.current, preview.mode, true);
+      state.photo.maxScale = preview.mode === 'original' && geometry ? Math.min(8, Math.max(1, geometry.sourceWidth / geometry.width)) : 8;
+      $('photo-download').hidden = !/^p\d{6}$/.test(preview.frame.id);
+      if (!$('photo-download').hidden) $('photo-download').href = '/original/' + encodeURIComponent(preview.frame.id) + '?download=1';
+      transformPhoto();
+      preview.notify();
+      preview.schedule();
+    }
+    function photoPointerDown(event) {
+      const photo = state.photo;
+      if (!photo || event.button > 0) return;
+      photo.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      $('photo-stage').setPointerCapture(event.pointerId);
+      if (photo.pointers.size === 1) {
+        photo.downAt = performance.now(); photo.moved = false; photo.multi = false;
+        photo.drag = { x: event.clientX, y: event.clientY, panX: photo.x, panY: photo.y };
+      } else {
+        photo.multi = true; photo.moved = true;
+        const [a, b] = [...photo.pointers.values()];
+        photo.pinch = { distance: Math.hypot(a.x - b.x, a.y - b.y), scale: photo.scale, x: photo.x, y: photo.y, midX: (a.x + b.x) / 2, midY: (a.y + b.y) / 2 };
+      }
+    }
+    function photoPointerMove(event) {
+      const photo = state.photo;
+      if (!photo?.pointers.has(event.pointerId)) return;
+      photo.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+      if (photo.pointers.size >= 2 && photo.pinch?.distance > 0) {
+        const [a, b] = [...photo.pointers.values()], start = photo.pinch;
+        const rect = $('photo-stage').getBoundingClientRect();
+        photo.scale = Math.max(1, Math.min(photo.maxScale || 8, start.scale * Math.hypot(a.x - b.x, a.y - b.y) / start.distance));
+        const ratio = photo.scale / start.scale, centerX = rect.left + rect.width / 2, centerY = rect.top + rect.height / 2;
+        photo.x = (a.x + b.x) / 2 - centerX - (start.midX - centerX - start.x) * ratio;
+        photo.y = (a.y + b.y) / 2 - centerY - (start.midY - centerY - start.y) * ratio;
+      } else if (photo.drag) {
+        const dx = event.clientX - photo.drag.x, dy = event.clientY - photo.drag.y;
+        if (Math.hypot(dx, dy) > 8) photo.moved = true;
+        if (photo.scale > 1) { photo.x = photo.drag.panX + dx; photo.y = photo.drag.panY + dy; }
+      }
+      transformPhoto();
+    }
+    function photoPointerEnd(event) {
+      const photo = state.photo;
+      if (!photo?.pointers.has(event.pointerId)) return;
+      photo.pointers.delete(event.pointerId);
+      if (event.type === 'pointercancel') photo.moved = true;
+      if (photo.pointers.size) {
+        const [point] = photo.pointers.values();
+        photo.drag = { ...point, panX: photo.x, panY: photo.y };
+        return;
+      }
+      photo.preview.schedule();
+      if (!photo.multi && !photo.moved && performance.now() - photo.downAt < 350 && performance.now() >= photo.suppressTapUntil) closePhoto();
+    }
+    function createPreview(frame, bird, metadata, visual) {
+      closePhoto();
+      const area = el('div', 'preview-area'), wrap = el('div', 'crop-wrap'), status = el('p', 'preview-status');
+      const svg = document.createElementNS('http://www.w3.org/2000/svg', 'svg'); svg.setAttribute('aria-hidden', 'true');
+      const toggle = el('button', 'original-toggle');
+      toggle.type = 'button'; toggle.setAttribute('aria-pressed', 'false'); toggle.setAttribute('aria-label', '显示完整画面'); toggle.title = '完整画面 / 鸟体裁剪';
+      const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      icon.setAttribute('viewBox', '0 0 24 24'); icon.setAttribute('aria-hidden', 'true');
+      const path = document.createElementNS(icon.namespaceURI, 'path');
+      path.setAttribute('d', 'M4 9V4h5M15 4h5v5M20 15v5h-5M9 20H4v-5M8 16l4-5 4 5');
+      path.setAttribute('fill', 'none'); path.setAttribute('stroke', 'currentColor'); path.setAttribute('stroke-width', '1.8'); icon.append(path);
+      const modeLabel = el('span', '', '全图'); toggle.append(icon, modeLabel);
+      const maskLabel = el('label', 'switch-control'), mask = el('input'); mask.type = 'checkbox'; mask.setAttribute('role', 'switch'); maskLabel.append(mask, document.createTextNode('分割轮廓'));
+      const poseLabel = el('label', 'switch-control'), pose = el('input'); pose.type = 'checkbox'; pose.setAttribute('role', 'switch'); poseLabel.append(pose, document.createTextNode('姿态点'));
+      const retry = el('button', '', '重试清晰预览'); retry.type = 'button'; retry.hidden = true;
+      const preview = { frame, bird, area, wrap, svg, toggle, mode: 'crop', targetMode: 'crop', current: null, loading: false, images: new Map(), sequence: 0, pending: null, timer: null, failedUrl: null };
+      state.preview = preview;
+      const renderOverlay = () => {
+        const valid = !preview.loading && drawOverlay(svg, bird, mask.checked, pose.checked, frame, preview.mode === 'original');
+        mask.disabled = !valid || !bird.mask?.path;
+        pose.disabled = !valid || !bird.posePoints?.length;
+        if (!valid) svg.replaceChildren();
+        return valid;
+      };
+      const validFrame = /^p\d{6}$/.test(frame.id) && number(frame.width) && frame.width > 0 && number(frame.height) && frame.height > 0;
+      if (!validFrame) toggle.title = '缺少原图尺寸或照片标识，无法选择清晰预览';
+      const loadedText = () => preview.mode === 'crop' ? '鸟体裁剪 · 点击图片放大' :
+        preview.images.get('original')?.native ? '完整画面 · 原文件分辨率' : '完整画面 · ' + format(preview.images.get('original')?.edge) + 'px 预览';
+      preview.notify = () => {
+        if (state.photo?.preview !== preview) return;
+        $('photo-status').textContent = status.textContent;
+        $('photo-status').setAttribute('role', status.getAttribute('role') || 'status');
+        $('photo-retry').hidden = retry.hidden;
+      };
+      function cancelPending() {
+        clearTimeout(preview.timer); preview.sequence++;
+        if (preview.pending) { preview.pending.image.removeAttribute('src'); preview.pending.image.remove(); preview.pending = null; }
+        preview.loading = false; area.setAttribute('aria-busy', 'false');
+      }
+      preview.cancel = () => {
+        const pending = !!preview.pending;
+        cancelPending();
+        if (pending && !preview.failedUrl) { status.textContent = loadedText(); status.setAttribute('role', 'status'); }
+        preview.notify();
+      };
+      function commit(entry, mode) {
+        if (state.preview !== preview) return;
+        const old = preview.current, photo = state.photo?.preview === preview ? state.photo : null;
+        const previous = preview.images.get(mode);
+        preview.images.set(mode, entry);
+        preview.mode = mode; preview.loading = false; preview.pending = null; preview.current = entry.image;
+        entry.image.hidden = false;
+        sizePreviewImage(preview, entry.image, mode, !!photo);
+        if (photo) {
+          if (old?.parentNode === $('photo-stage')) $('photo-stage').replaceChild(entry.image, old);
+          else $('photo-stage').append(entry.image);
+          photo.image = entry.image;
+          transformPhoto();
+        }
+        if (old && old !== entry.image) old.hidden = true;
+        if (previous && previous !== entry) previous.image.remove();
+        toggle.disabled = !validFrame; toggle.setAttribute('aria-pressed', String(mode === 'original'));
+        toggle.setAttribute('aria-label', mode === 'original' ? '显示鸟体裁剪' : '显示完整画面'); modeLabel.textContent = mode === 'original' ? '裁剪' : '全图';
+        const valid = renderOverlay();
+        area.setAttribute('aria-busy', 'false'); retry.hidden = true; status.setAttribute('role', 'status');
+        status.textContent = loadedText() + (!valid ? ' · 缺少有效裁剪坐标或原图尺寸，已停用叠加' : '');
+        preview.notify();
+      }
+      function load(mode, choice) {
+        if (state.preview !== preview) return;
+        if (preview.pending?.url === choice.url) return;
+        cancelPending();
+        const sequence = preview.sequence;
+        preview.loading = !preview.current || preview.mode !== mode;
+        area.setAttribute('aria-busy', 'true');
+        retry.hidden = true;
+        if (preview.loading) { svg.replaceChildren(); mask.disabled = true; pose.disabled = true; }
+        status.setAttribute('role', 'status'); status.textContent = mode === 'crop' ? '正在加载裁剪…' : preview.mode === 'original' ? '正在提升清晰度，仍显示已加载预览…' : '正在加载完整画面预览…';
+        preview.notify();
+        const image = el('img');
+        image.alt = (mode === 'original' ? '完整画面' : '鸟体裁剪') + ' · ' + (frame.source?.primary?.relative || frame.id);
+        image.decoding = 'async'; image.draggable = false; image.tabIndex = 0;
+        image.setAttribute('role', 'button'); image.setAttribute('aria-label', '打开照片浏览');
+        const entry = { image, ...choice };
+        preview.pending = entry;
+        image.hidden = true; wrap.insertBefore(image, svg);
+        const failed = () => {
+          if (state.preview !== preview || sequence !== preview.sequence) return;
+          image.remove(); preview.pending = null; preview.loading = false; preview.failedUrl = choice.url;
+          area.setAttribute('aria-busy', 'false'); toggle.disabled = !validFrame; renderOverlay();
+          status.setAttribute('role', 'alert'); retry.hidden = false;
+          status.textContent = mode === 'crop' ? '裁剪读取失败，未自动加载原图。' :
+            preview.mode === 'original' ? '清晰预览升级失败，仍显示已加载预览；可重试。' : preview.current ? '完整画面预览读取失败，仍显示裁剪；可重试。' : '完整画面预览读取失败，尚无可显示图像；可重试。';
+          if (preview.mode !== 'original') preview.targetMode = 'crop';
+          preview.notify();
+        };
+        image.addEventListener('load', async () => {
+          try { await image.decode(); }
+          catch { failed(); return; }
+          if (state.preview === preview && sequence === preview.sequence) { preview.failedUrl = null; commit(entry, mode); }
+        }, { once: true });
+        image.addEventListener('error', failed, { once: true });
+        image.addEventListener('click', () => openPhoto(preview));
+        image.addEventListener('pointerdown', () => { if (!$('photo-viewer').open) state.ignorePreviewClickUntil = 0; });
+        image.addEventListener('contextmenu', () => { state.ignorePreviewClickUntil = performance.now() + 1000; });
+        image.addEventListener('keydown', event => { if (['Enter', ' '].includes(event.key)) { event.preventDefault(); state.ignorePreviewClickUntil = 0; openPhoto(preview); } });
+        image.src = choice.url;
+      }
+      function ensureResolution(force = false) {
+        if (state.preview !== preview || preview.targetMode !== 'original' || !validFrame) return;
+        const photo = state.photo?.preview === preview ? state.photo : null;
+        if (photo?.pointers.size) { preview.schedule(); return; }
+        const geometry = sizePreviewImage(preview, el('img'), 'original', !!photo);
+        if (!geometry) return;
+        const scale = photo?.scale || 1, sourceEdge = Math.max(frame.width, frame.height), dpr = devicePixelRatio || 1;
+        let need = Math.min(sourceEdge, Math.ceil(Math.max(geometry.width, geometry.height) * scale * (scale > 1 ? dpr : Math.min(dpr, 2))));
+        if (scale === 1) need = Math.min(need, 1920);
+        const tier = [960, 1920, 3840].find(edge => edge >= need);
+        const choice = { url: tier ? '/preview/' + encodeURIComponent(frame.id) + '/' + tier + '.jpg' : '/original/' + encodeURIComponent(frame.id), edge: Math.min(tier || sourceEdge, sourceEdge), native: !tier };
+        const loaded = preview.images.get('original');
+        if (loaded && (loaded.edge >= choice.edge || (!force && need <= loaded.edge * 1.12))) {
+          if (preview.pending) preview.cancel();
+          if (preview.mode !== 'original') commit(loaded, 'original');
+          return;
+        }
+        if (!force && preview.failedUrl === choice.url) return;
+        load('original', choice);
+      }
+      preview.schedule = () => { clearTimeout(preview.timer); preview.timer = setTimeout(ensureResolution, 220); };
+      preview.resize = () => {
+        if (preview.current) {
+          const photo = state.photo?.preview === preview ? state.photo : null;
+          const geometry = sizePreviewImage(preview, preview.current, preview.mode, !!photo);
+          if (photo && geometry && preview.mode === 'original') photo.maxScale = Math.min(8, Math.max(1, geometry.sourceWidth / geometry.width));
+        }
+        preview.schedule();
+      };
+      toggle.addEventListener('click', () => {
+        cancelPending(); preview.failedUrl = null;
+        preview.targetMode = preview.targetMode === 'original' ? 'crop' : 'original';
+        if (preview.targetMode === 'original') ensureResolution(true);
+        else if (preview.images.has('crop')) commit(preview.images.get('crop'), 'crop');
+        else load('crop', { url: media(metadata.item?.crop || bird.crop), edge: 0 });
+      });
+      retry.addEventListener('click', () => {
+        preview.failedUrl = null;
+        if (preview.current) { preview.targetMode = 'original'; ensureResolution(true); }
+        else load('crop', { url: media(metadata.item?.crop || bird.crop), edge: 0 });
+      });
+      preview.retry = () => retry.click();
+      mask.addEventListener('change', renderOverlay); pose.addEventListener('change', renderOverlay);
+      status.setAttribute('aria-live', 'polite'); wrap.append(svg);
+      const tools = el('div', 'image-controls'); tools.append(maskLabel, poseLabel, toggle);
+      tools.addEventListener('click', event => event.stopPropagation());
+      tools.addEventListener('pointerdown', event => event.stopPropagation());
+      area.append(wrap, tools);
+      visual.append(area, status, retry);
+      load('crop', { url: media(metadata.item?.crop || bird.crop), edge: 0 });
+    }
+    function focusCandidate(frame, bird) {
+      state.preview?.cancel();
+      state.referenceRequest?.abort();
+      const references = new AbortController(); state.referenceRequest = references;
+      const metadata = candidateMetadata(frame, bird);
+      const panel = $('focus-panel');
+      panel.replaceChildren();
+      for (const card of $('candidates')?.querySelectorAll('[data-candidate-id]') || []) card.classList.toggle('focused', card.dataset.candidateId === frame.id + ':' + bird.id);
+      $('dialog-title').textContent = speciesLabel(metadata.species) + ' · 实例 ' + bird.id;
+      $('dialog-source').textContent = frame.source?.primary?.relative || frame.id;
+      const layout = el('div', 'detail-layout'), visual = el('section');
+      createPreview(frame, bird, metadata, visual);
+      const copy = el('section', 'details-copy'), badges = el('div', 'badges');
+      badges.append(el('span', badgeClass(metadata.birdVerification?.status), verificationLabel(metadata.birdVerification)), el('span', 'badge review', metadata.decision === 'keep' && metadata.birdVerification?.status === 'bird' ? '优选' : '未入选'));
+      copy.append(badges, speciesDetails(metadata.species, false, references.signal));
+      copy.append(captureDetails(metadata.capture, false, metadata.shootGroup));
+      const technical = el('details', 'technical-details');
+      technical.append(el('summary', '', '技术选片依据'), el('p', 'reason', metadata.reason), metrics(bird, metadata.quality), el('p', 'muted', '像素与梯度不等于绝对合焦；仅在可比对象内使用相对指标。'));
+      if (bird.maskIssue || bird.poseIssue || bird.eyeIssue) technical.append(el('p', 'muted', [bird.maskIssue, bird.poseIssue, bird.eyeIssue].filter(Boolean).join(' · ')));
+      copy.append(technical);
+      layout.append(visual, copy); panel.append(layout);
+    }
+    function renderGroup(group, item) {
+      if (!group || !Array.isArray(group.frames)) throw new Error('新版组详情缺少 frames');
+      const frame = group.frames.find(candidate => candidate.id === item.frameId);
+      const bird = frame?.instances?.find(candidate => String(candidate.id) === String(item.instanceId));
+      if (!bird) throw new Error('新版组详情找不到该索引的精确帧 / 实例，未以其他鸟体替代');
+      const panel = el('section'); panel.id = 'focus-panel';
+      const candidates = el('section', 'candidate-section'); candidates.id = 'candidates';
+      candidates.append(el('h3', '', '鸟体对比'), el('p', 'muted', '浏览同图或同组的鸟体候选；不同鸟体不能直接作为同鸟清晰度比较。'));
+      const grid = el('div', 'candidate-list');
+      let instanceCount = 0;
+      for (const candidateFrame of group.frames) {
+        if (!Array.isArray(candidateFrame.instances)) throw new Error('新版组详情的实例列表无效');
+        if (!candidateFrame.instances.length) {
+          const empty = el('div', 'frame-empty');
+          empty.append(el('h3', '', candidateFrame.source?.primary?.relative || candidateFrame.id), el('p', 'muted', '未检出鸟体，无鸟体裁剪；不以背景代替。'));
+          if (candidateFrame.reason) empty.append(el('p', 'reason', candidateFrame.reason));
+          grid.append(empty);
+        }
+        for (const candidateBird of candidateFrame.instances) {
+          instanceCount++;
+          const metadata = candidateMetadata(candidateFrame, candidateBird), card = el('article', 'candidate'), button = el('button');
+          card.dataset.candidateId = candidateFrame.id + ':' + candidateBird.id; button.type = 'button';
+          if (candidateBird.thumbnail || metadata.item?.thumbnail) button.append(imageBox(metadata.item?.thumbnail || candidateBird.thumbnail, '组内裁剪 · 实例 ' + candidateBird.id));
+          else button.append(el('p', 'image-error', '此实例没有缩略图'));
+          button.append(el('h3', '', (candidateFrame.source?.primary?.relative || candidateFrame.id) + ' · 实例 ' + candidateBird.id));
+          button.setAttribute('aria-label', '查看组内实例 ' + candidateBird.id + ' · ' + (candidateFrame.source?.primary?.relative || candidateFrame.id));
+          button.addEventListener('click', () => {
+            try { focusCandidate(candidateFrame, candidateBird); $('focus-panel').scrollIntoView({ block: 'start', behavior: 'instant' }); }
+            catch (error) { $('focus-panel').replaceChildren(el('p', 'notice error', error.message)); }
+          });
+          card.append(button, el('span', badgeClass(metadata.birdVerification?.status), verificationLabel(metadata.birdVerification)), el('span', 'badge review', qualityLabel(metadata.quality)));
+          grid.append(card);
+        }
+      }
+      candidates.append(grid);
+      $('detail').replaceChildren(...(instanceCount > 1 ? [panel, candidates] : [panel]));
+      focusCandidate(frame, bird);
+    }
+    async function openDetail(item) {
+      if (state.detailRequest) state.detailRequest.abort();
+      const controller = new AbortController(); state.detailRequest = controller;
+      state.active = item;
+      state.preview?.cancel(); closePhoto(); state.preview = null;
+      state.referenceRequest?.abort();
+      $('dialog-title').textContent = speciesLabel(item.species) + ' · 实例 ' + item.instanceId;
+      $('dialog-source').textContent = item.sourceLabel;
+      $('detail').replaceChildren(el('p', 'muted', '正在读取新版组详情…'));
+      if (!$('dialog').open) $('dialog').showModal();
+      try {
+        const group = await json(groupUrl(item.groupId), controller.signal);
+        if (controller.signal.aborted) return;
+        renderGroup(group, item);
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        const message = el('div', 'notice error');
+        message.setAttribute('role', 'alert');
+        message.append(el('p', '', error.message), el('p', '', '未回退旧版分类或选择结果。'));
+        const retry = el('button', '', '重试组详情'); retry.type = 'button'; retry.addEventListener('click', () => openDetail(item));
+        $('detail').replaceChildren(message, retry);
+      }
+    }
+    $('preferred-tab').addEventListener('click', () => switchPool('preferred'));
+    $('review-tab').addEventListener('click', () => switchPool('review'));
+    for (const id of ['preferred-tab', 'review-tab']) $(id).addEventListener('keydown', event => {
+      if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+        event.preventDefault();
+        switchPool(event.key === 'Home' ? 'preferred' : event.key === 'End' ? 'review' : state.pool === 'preferred' ? 'review' : 'preferred', true);
+      }
+    });
+    for (const id of ['shoot-group', 'search', 'tier', 'verification', 'sort', 'collapse', 'page-size']) $(id).addEventListener(id === 'search' ? 'input' : 'change', () => { state.page = 1; render(); });
+    function changePage(delta) { state.page += delta; render(); $('gallery').scrollIntoView({ block: 'start' }); }
+    $('previous').addEventListener('click', () => changePage(-1));
+    $('next').addEventListener('click', () => changePage(1));
+    $('refresh').addEventListener('click', refresh);
+    $('close').addEventListener('click', () => $('dialog').close());
+    $('dialog').addEventListener('close', () => {
+      if ($('dialog').open) return;
+      if (state.detailRequest) state.detailRequest.abort();
+      state.referenceRequest?.abort();
+      state.preview?.cancel(); closePhoto(); $('detail').replaceChildren(); state.preview = null; state.active = null;
+    });
+    for (const name of ['pointerdown', 'pointermove', 'pointerup', 'pointercancel']) $('photo-stage').addEventListener(name, name === 'pointerdown' ? photoPointerDown : name === 'pointermove' ? photoPointerMove : photoPointerEnd);
+    $('photo-stage').addEventListener('contextmenu', () => { if (state.photo) state.photo.suppressTapUntil = performance.now() + 1000; });
+    $('photo-exit').addEventListener('click', closePhoto);
+    $('photo-retry').addEventListener('click', () => state.photo?.preview.retry());
+    for (const [id, delta] of [['photo-zoom-in', .5], ['photo-zoom-out', -.5]]) {
+      const button = $(id);
+      let touchStart, touchActivated = -Infinity;
+      const activate = () => { if (state.photo) { state.photo.scale += delta; transformPhoto(); state.photo.preview.schedule(); } };
+      button.addEventListener('pointerdown', event => { touchStart = { x: event.clientX, y: event.clientY, at: performance.now() }; });
+      button.addEventListener('pointerup', event => {
+        if (event.pointerType === 'touch' && touchStart && performance.now() - touchStart.at < 350 && Math.hypot(event.clientX - touchStart.x, event.clientY - touchStart.y) < 8) {
+          touchActivated = performance.now(); activate();
+        }
+        touchStart = null;
+      });
+      button.addEventListener('click', event => { if (event.detail === 0 || performance.now() - touchActivated > 600) activate(); });
+    }
+    $('photo-viewer').addEventListener('close', () => {
+      const photo = state.photo;
+      if (photo) {
+        photo.preview.cancel();
+        photo.image.style.transform = '';
+        if (photo.preview.wrap.isConnected) photo.preview.wrap.insertBefore(photo.image, photo.preview.svg);
+        sizePreviewImage(photo.preview, photo.image, photo.preview.mode);
+        $('dialog').scrollTop = photo.scroll;
+      }
+      state.photo = null; state.ignorePreviewClickUntil = performance.now() + 400;
+      $('photo-stage').replaceChildren();
+    });
+    window.addEventListener('resize', () => { state.preview?.resize(); transformPhoto(); });
+    window.addEventListener('pagehide', () => { clearTimeout(state.timer); state.request?.abort(); state.detailRequest?.abort(); state.referenceRequest?.abort(); });
+    refresh();
+  </script>
+</body>
+</html>
