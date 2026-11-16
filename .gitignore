@@ -33,3 +33,7 @@ public/culling/source.zip
 .venv/
 __pycache__/
 *.py[cod]
+
+# Complete desktop runtimes, models, packages and local validation
+desktop-build/
+desktop-artifacts/

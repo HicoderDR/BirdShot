@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; frame-src http://127.0.0.1:*; connect-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; object-src 'none'">
+  <title>BirdShot · 本机照片库</title>
+  <link rel="stylesheet" href="style.css">
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <header class="app-header">
+    <span class="brand">BIRDSHOT</span>
+    <h1>本机照片库</h1>
+    <span id="runtime-status" role="status">正在连接桌面服务…</span>
+    <button id="refresh-state" type="button">刷新状态</button>
+  </header>
+  <div id="action-error" class="notice error" role="alert" hidden></div>
+  <div class="workspace">
+    <aside aria-label="本机照片库管理">
+      <section>
+        <h2>照片来源</h2>
+        <div class="source-actions">
+          <button id="choose-source" type="button">添加来源目录…</button>
+          <button id="attach-existing" type="button">接入旧批次…</button>
+        </div>
+        <p class="muted">使用系统文件夹选择器；接入旧批次不复制原图。库状态会持久保存。</p>
+        <p id="sources-empty" role="status">正在读取照片来源…</p>
+        <ul id="source-list" class="source-list"></ul>
+        <p class="muted">移除仅解绑来源，不删除原图或处理结果。</p>
+      </section>
+      <section>
+        <h2>处理输出</h2>
+        <p id="output-root" class="path">尚未读取输出目录</p>
+        <button id="choose-output" type="button">选择输出目录…</button>
+        <details id="runtime-details">
+          <summary>模型与运行环境</summary>
+          <ul id="model-list"></ul>
+        </details>
+      </section>
+      <details id="network-settings">
+        <summary>网络服务设置</summary>
+        <p id="service-status" role="status">正在读取服务状态…</p>
+        <form id="service-form">
+          <label>访问范围
+            <select id="service-mode">
+              <option value="local">仅本机（默认）</option>
+              <option value="lan">局域网共享</option>
+              <option value="all">所有来源只读共享</option>
+            </select>
+          </label>
+          <label>端口<input id="service-port" type="number" min="1024" max="65535" step="1" value="5274" required></label>
+          <label id="lan-ip-field" hidden>指定本机局域网 IPv4（可选）<input id="service-lan-ip" type="text" placeholder="留空由服务检测" maxlength="15" autocomplete="off"></label>
+          <p id="share-risk" class="notice" role="status" hidden>共享没有身份认证：可达设备可能查看照片、原图和登记的拍摄地点。仅在可信网络开启；所有来源模式扩大可访问范围。不要转发地址或将端口暴露到公网。</p>
+          <label id="share-confirm-field" class="check" hidden><input id="share-confirm" type="checkbox">我了解风险，允许本次开启共享</label>
+          <button id="apply-service" type="submit">应用并启动服务</button>
+        </form>
+        <button id="apply-suggested-port" type="button" hidden>使用建议端口</button>
+        <div id="service-addresses" aria-label="服务就绪地址"></div>
+        <p class="muted">仅本机不向其他设备开放；共享设置由主进程检查并应用。端口冲突不会终止或接管已有服务。</p>
+      </details>
+    </aside>
+    <main>
+      <div class="gallery-heading"><h2>图库</h2><button id="reload-gallery" type="button" disabled>重新加载图库</button></div>
+      <section id="gallery-message" class="gallery-message" role="status">
+        <h2 id="gallery-message-title">正在读取本机照片库</h2>
+        <p id="gallery-message-copy">请稍候，正在连接桌面管理服务。</p>
+      </section>
+      <iframe id="gallery-frame" title="BirdShot 图库（无桌面管理权限）" referrerpolicy="no-referrer" hidden></iframe>
+    </main>
+  </div>
+</body>
+</html>

@@ -8,6 +8,7 @@ import hashlib
 import io
 import json
 import math
+import os
 from pathlib import Path
 import shutil
 import time
@@ -16,7 +17,7 @@ import urllib.request
 from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parents[1]
-CACHE = ROOT / ".tools" / "species-models"
+CACHE = Path(os.environ["BIRDSHOT_MODEL_CACHE"]) if os.environ.get("BIRDSHOT_MODEL_CACHE") else ROOT / ".tools" / "species-models"
 MODELS = {
     "huge": {"repo": "imageomics/bioclip-2.5-vith14", "revision": "6e3d04e3d6522012c88181085c5ae666e14c45cd",
              "architecture": "ViT-H-14", "size": 3944517804,

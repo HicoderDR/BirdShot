@@ -18,6 +18,13 @@ POLICY = f"exif-oriented-jpeg88-progressive-icc-v1-pillow-{PILLOW_VERSION}"
 ENTRY = re.compile(r"^[0-9a-f]{64}-(960|1920|3840)\.jpg$")
 
 
+def cache_io_path(path):
+    value = str(path)
+    if os.name == "nt" and not value.startswith("\\\\?\\"):
+        value = "\\\\?\\UNC\\" + value[2:] if value.startswith("\\\\") else "\\\\?\\" + value
+    return Path(value)
+
+
 @dataclass(frozen=True)
 class Source:
     path: Path
@@ -52,13 +59,16 @@ def not_modified(headers, source):
 
 
 class PreviewCache:
-    def __init__(self, source_root, photos, cache_root, budget=512 * 1024 * 1024, concurrency=2):
-        self.source_root = Path(source_root).resolve(strict=True)
+    def __init__(self, source_root, photos, cache_root, budget=512 * 1024 * 1024, concurrency=2, source_roots=None):
+        self.source_root = Path(source_root).resolve()
+        self.source_roots = {Path(root).resolve() for root in
+                             (source_roots if source_roots is not None else [self.source_root])}
         self.photos = photos
         self.root = Path(cache_root).resolve()
-        if self.root.is_relative_to(self.source_root):
+        if any(self.root.is_relative_to(root) for root in self.source_roots):
             raise ValueError("Preview cache cannot be created inside the original photo directory")
-        self.root.mkdir(parents=True, exist_ok=True)
+        self.io_root = cache_io_path(self.root)
+        self.io_root.mkdir(parents=True, exist_ok=True)
         self.budget = budget
         self.decode_slots = threading.BoundedSemaphore(concurrency)
         self.registry_lock = threading.Lock()
@@ -72,16 +82,22 @@ class PreviewCache:
         photo = self.photos.get(frame_id)
         if not photo or not photo["supported"]:
             raise KeyError("Unknown or unsupported registered frame")
-        path = (self.source_root / photo["primary"]["relative"]).resolve(strict=True)
-        if not path.is_relative_to(self.source_root) or path.suffix.lower() not in {".jpg", ".jpeg", ".png"}:
+        root = Path(photo.get("sourceRoot") or self.source_root).resolve()
+        if root not in self.source_roots:
+            raise ValueError("Original root is not explicitly registered")
+        relative = Path(photo["primary"]["relative"])
+        if relative.is_absolute() or ".." in relative.parts:
+            raise ValueError("Original path is not a registered relative path")
+        path = (root / relative).resolve(strict=True)
+        if not path.is_relative_to(root) or path.suffix.lower() not in {".jpg", ".jpeg", ".png"}:
             raise ValueError("Original is outside the registered photo boundary")
         stat = path.stat()
-        key = hashlib.sha256(json.dumps([frame_id, photo["primary"]["relative"], stat.st_size, stat.st_mtime_ns,
+        key = hashlib.sha256(json.dumps([frame_id, str(root), photo["primary"]["relative"], stat.st_size, stat.st_mtime_ns,
                                          edge, POLICY if edge is not None else "unmodified-original-v1"]).encode()).hexdigest()
         return Source(path, stat.st_size, stat.st_mtime_ns, key, '"' + key + '"')
 
     def _prune(self):
-        entries = [path for path in self.root.iterdir() if ENTRY.fullmatch(path.name) and path.is_file() and not path.is_symlink()]
+        entries = [path for path in self.io_root.iterdir() if ENTRY.fullmatch(path.name) and path.is_file() and not path.is_symlink()]
         total = sum(path.stat().st_size for path in entries)
         for path in sorted(entries, key=lambda p: p.stat().st_mtime_ns):
             if total <= self.budget:
@@ -92,7 +108,7 @@ class PreviewCache:
 
     def get(self, frame_id, edge):
         source = self.describe(frame_id, edge)
-        path = self.root / f"{source.key}-{edge}.jpg"
+        path = self.io_root / f"{source.key}-{edge}.jpg"
         with self.registry_lock:
             lock = self.key_locks.setdefault(source.key, threading.Lock())
         with lock:
@@ -130,7 +146,7 @@ class PreviewCache:
                 if (after.st_size, after.st_mtime_ns) != (source.size, source.mtime_ns):
                     raise RuntimeError("Original changed during preview generation; no unstable cache was saved")
                 with self.io_lock:
-                    temporary = self.root / f"{source.key}-{edge}.{uuid.uuid4().hex}.part"
+                    temporary = self.io_root / f"{uuid.uuid4().hex}.part"
                     try:
                         with temporary.open("xb") as target:
                             target.write(data)

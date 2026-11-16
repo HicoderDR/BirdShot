@@ -30,6 +30,7 @@ from PIL import Image
 from batch_inference import NativeDetector, INFERENCE_VERSION, ROOT
 from preview_cache import PreviewCache, not_modified
 from species_reference import SpeciesReferences, ReferenceError
+from gallery_navigation import capture_metadata, enrich_navigation
 
 POLICY_VERSION = "strict-crop-only-v1"
 SUPPORTED = {".jpg", ".jpeg", ".png"}
@@ -93,9 +94,13 @@ def versions():
     }
 
 
-def inventory(source):
+def inventory(source, exclude_paths=None):
     records, others, formats, warnings = [], [], Counter(), []
-    for path in sorted(source.rglob("*")):
+    excluded = {os.path.normcase(str(Path(path).resolve())) for path in exclude_paths or []}
+    def scan_error(error):
+        raise error
+    paths = (Path(folder) / name for folder, _, names in os.walk(source, onerror=scan_error) for name in names)
+    for path in sorted(paths):
         if not path.is_file():
             continue
         relative = path.relative_to(source).as_posix()
@@ -122,6 +127,8 @@ def inventory(source):
         if not previews:
             primaries += raws
         for record in primaries:
+            if os.path.normcase(str((source / record["relative"]).resolve())) in excluded:
+                continue
             companions = raws if previews and record is previews[0] else []
             photo = {"id": f"p{len(photos) + 1:06d}", "primary": record, "companions": companions,
                      "supported": record["format"] in SUPPORTED and not record.get("blocked"),
@@ -158,22 +165,25 @@ def inventory(source):
                       "status": "pending", "thumbnail": None} for i, group in enumerate(groups)]
     return {
         "source": str(source), "photos": photos, "groups": group_records, "formats": dict(formats),
-        "physicalPhotos": len(records), "pairedRaw": sum(len(p["companions"]) for p in photos),
+        "physicalPhotos": sum(1 + len(p["companions"]) for p in photos), "pairedRaw": sum(len(p["companions"]) for p in photos),
         "rawOnly": sum(not p["supported"] and p["primary"]["format"] in RAW for p in photos),
         "otherFiles": others, "warnings": warnings, "sourceBytes": sum(r["size"] for r in records),
     }
 
 
-def initialize(source):
+def initialize(source, output=None, exclude_paths=None):
     source = source.resolve(strict=True)
     if not source.is_dir():
         raise ValueError("源目录不存在")
-    manifest = inventory(source)
-    free = shutil.disk_usage(source.parent).free
+    job = Path(output).resolve() if output is not None else source.parent / f"BirdShot_Selection_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}"
+    if job.is_relative_to(source):
+        raise ValueError("输出不能位于原片目录内")
+    job.parent.mkdir(parents=True, exist_ok=True)
+    manifest = inventory(source, exclude_paths)
+    free = shutil.disk_usage(job.parent).free
     if free < 1024 * 1024 * 1024:
         raise RuntimeError("可用空间不足1GiB，未创建输出")
     model_versions = versions()
-    job = source.parent / f"BirdShot_Selection_{datetime.now():%Y%m%d_%H%M%S}_{uuid.uuid4().hex[:6]}"
     job.mkdir()
     for folder in ["groups", "crops", "selected", "report"]:
         (job / folder).mkdir()
@@ -190,7 +200,9 @@ def initialize(source):
              "currentGroup": None, "phase": "已清点，等待开始", "output": str(job), "startedAt": None, "updatedAt": datetime.now().isoformat()}
     atomic_json(job / "status.json", state)
     shutil.copyfile(ROOT / "scripts" / "batch-report.html", job / "report" / "index.html")
-    atomic_json(ROOT / ".tools" / "batch-current.json", {"job": str(job)})
+    if output is None:
+        (ROOT / ".tools").mkdir(exist_ok=True)
+        atomic_json(ROOT / ".tools" / "batch-current.json", {"job": str(job)})
     print(json.dumps({"job": str(job), "photos": state["totalPhotos"], "physical": state["physicalPhotos"],
                       "pairedRaw": state["pairedRaw"], "rawOnly": manifest["rawOnly"], "groups": state["totalGroups"]}, ensure_ascii=False), flush=True)
     return job
@@ -453,11 +465,37 @@ def run(job, node, threads=4):
             worker.close()
 
 
-def serve(job, port, lan_ip=None, prefix=24, allow_all=False, allowed_hosts=None):
+def serve(job, port, lan_ip=None, prefix=24, allow_all=False, allowed_hosts=None, instance_id=None, read_only=False):
     manifest = read_json(job / "manifest.json")
     source = Path(manifest["source"]).resolve()
     photos = {p["id"]: p for p in manifest["photos"]}
-    previews = PreviewCache(source, photos, job / "revisions" / "image-preview-cache-v1")
+    previews = PreviewCache(source, photos, job / "revisions" / "image-preview-cache-v1",
+                            source_roots=manifest.get("sourceRoots", [source]))
+    manifest_signature = None
+    manifest_lock = threading.Lock()
+    registered_media = {}
+    def refresh_manifest():
+        nonlocal manifest, manifest_signature, registered_media
+        path = job / "manifest.json"
+        with manifest_lock:
+            signature = (path.stat().st_mtime_ns, path.stat().st_size)
+            if signature == manifest_signature:
+                return
+            updated = read_json(path)
+            roots = {Path(root).resolve() for root in updated.get("sourceRoots", [source])}
+            if any(previews.root.is_relative_to(root) for root in roots):
+                raise ValueError("Preview cache overlaps a registered original directory")
+            media_roots = {Path(root).resolve() for root in updated.get("mediaRoots", [])}
+            media = {}
+            for record in updated.get("media", []):
+                root, relative = Path(record["root"]).resolve(), Path(record["relative"])
+                candidate = (root / relative).resolve()
+                if root in media_roots and not relative.is_absolute() and ".." not in relative.parts and candidate.is_relative_to(root):
+                    media[record["path"]] = candidate
+            previews.photos = {photo["id"]: photo for photo in updated["photos"]}
+            previews.source_roots = roots
+            manifest, manifest_signature, registered_media = updated, signature, media
+    refresh_manifest()
     gallery_revision = job / "revisions" / "verified-birds-birder-v2"
     species_references = SpeciesReferences(job, [])
     species_index_signature = None
@@ -561,7 +599,8 @@ def serve(job, port, lan_ip=None, prefix=24, allow_all=False, allowed_hosts=None
             except ValueError as error:
                 print(f"Invalid image preview request: {error}", file=sys.stderr)
                 self.send_error(400, "Invalid image preview parameters")
-            except FileNotFoundError:
+            except FileNotFoundError as error:
+                print(f"Registered image/cache path missing for {frame_id}: {error}", file=sys.stderr)
                 self.send_error(404, "Registered original is missing")
             except (OSError, RuntimeError, Image.DecompressionBombError) as error:
                 print(f"Image preview failed for {frame_id}: {error}", file=sys.stderr)
@@ -575,6 +614,16 @@ def serve(job, port, lan_ip=None, prefix=24, allow_all=False, allowed_hosts=None
                 self.send_error(400)
                 return
             query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+            if route == "/health.json":
+                data = json.dumps({"instanceId": instance_id, "status": "ready"}).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            refresh_manifest()
             if route == "/species-reference":
                 name = query.get("scientificName", [""])[0]
                 try:
@@ -629,14 +678,14 @@ def serve(job, port, lan_ip=None, prefix=24, allow_all=False, allowed_hosts=None
                     print("Species media client disconnected", file=sys.stderr)
                 return
             if route == "/preview" or route.startswith("/preview/"):
-                match = re.fullmatch(r"/preview/(p\d{6})/(960|1920|3840)\.jpg", route)
+                match = re.fullmatch(r"/preview/(p(?:\d{6}|[0-9a-f]{24}))/(960|1920|3840)\.jpg", route)
                 if not match or query:
                     self.send_error(400, "Allowed preview edges: 960, 1920, 3840")
                     return
                 self.serve_image(match.group(1), int(match.group(2)))
                 return
             if route.startswith("/original/"):
-                match = re.fullmatch(r"/original/(p\d{6})", route)
+                match = re.fullmatch(r"/original/(p(?:\d{6}|[0-9a-f]{24}))", route)
                 if not match or query not in ({}, {"download": ["1"]}):
                     self.send_error(400, "Invalid original image request")
                     return
@@ -650,31 +699,49 @@ def serve(job, port, lan_ip=None, prefix=24, allow_all=False, allowed_hosts=None
                 path = job / "report" / "index.html"
             elif route == "/gallery.json":
                 path = gallery_revision / "gallery.json"
-                if not path.exists():
-                    payload = {"version": 1, "revision": "verified-bird-gallery-birder-v2", "status": "processing", "updatedAt": datetime.now().isoformat(),
-                               "progress": {"processed": 0, "total": 5504},
-                               "summary": {"preferred": 0, "bird": 0, "nonBird": 0, "unknown": 5504, "oldSelected": 343,
-                                           "removedOld": 0, "addedNew": 0}, "items": [],
-                               "notice": "全部候选尚未完成验鸟；不将旧343候选当新优选"}
-                    data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
-                    self.send_response(200)
-                    self.send_header("Content-Type", "application/json; charset=utf-8")
-                    self.send_header("Content-Length", str(len(data)))
-                    self.send_header("Cache-Control", "no-store")
-                    self.end_headers()
-                    self.wfile.write(data)
-                    return
-            elif re.fullmatch(r"/gallery/group/g\d{5}\.json", route):
-                path = gallery_revision / "groups" / route.rsplit("/", 1)[-1]
+                payload = read_json(path) if path.exists() else {
+                    "version": 1, "status": "processing", "progress": {"processed": 0, "total": len(read_json(job / "mapping.json")["crops"])},
+                    "summary": {"preferred": 0, "bird": 0, "nonBird": 0, "unknown": 0, "oldSelected": 0,
+                                "removedOld": 0, "addedNew": 0}, "items": [],
+                    "notice": "候选尚未完成验鸟；不将旧候选当新优选"}
+                payload = enrich_navigation(payload, manifest, capture_metadata(job))
+                data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+                use_gzip = "gzip" in self.headers.get("Accept-Encoding", "")
+                if use_gzip:
+                    data = gzip.compress(data, compresslevel=3, mtime=0)
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                if use_gzip:
+                    self.send_header("Content-Encoding", "gzip")
+                    self.send_header("Vary", "Accept-Encoding")
+                self.send_header("Cache-Control", "no-store")
+                self.end_headers()
+                self.wfile.write(data)
+                return
+            elif re.fullmatch(r"/gallery/group/g(?:\d{5}|[0-9a-f]{24})\.json", route):
+                group_name = route.rsplit("/", 1)[-1]
+                if group_name[:-5] in {group["id"] for group in manifest["groups"]}:
+                    path = gallery_revision / "groups" / group_name
             elif route in {"/status.json", "/groups.json", "/mapping.json", "/manifest.json", "/verification.json"}:
                 path = job / route[1:]
-            elif re.fullmatch(r"/group/g\d{5}\.json", route):
-                path = job / "groups" / route.rsplit("/", 1)[-1]
+            elif re.fullmatch(r"/group/g(?:\d{5}|[0-9a-f]{24})\.json", route):
+                group_name = route.rsplit("/", 1)[-1]
+                if group_name[:-5] in {group["id"] for group in manifest["groups"]}:
+                    path = job / "groups" / group_name
             elif route.startswith("/media/"):
                 refresh_registered_media()
                 relative = route[len("/media/"):]
                 candidate = (job / relative).resolve()
-                if relative in allowed_media and candidate.is_relative_to(job.resolve()) and candidate.suffix.lower() in {".jpg", ".jpeg", ".png"}:
+                if relative in registered_media:
+                    candidate = registered_media[relative]
+                    record = next(row for row in manifest["media"] if row["path"] == relative)
+                    if not candidate.resolve().is_relative_to(Path(record["root"]).resolve()):
+                        self.send_error(403)
+                        return
+                    if candidate.suffix.lower() in {".jpg", ".jpeg", ".png"}:
+                        path = candidate
+                elif relative in allowed_media and candidate.is_relative_to(job.resolve()) and candidate.suffix.lower() in {".jpg", ".jpeg", ".png"}:
                     path = candidate
             if path is None or not path.is_file():
                 self.send_error(404)
@@ -709,7 +776,7 @@ def serve(job, port, lan_ip=None, prefix=24, allow_all=False, allowed_hosts=None
             except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError) as error:
                 print(f"Report client disconnected: {type(error).__name__}", file=sys.stderr)
         def do_POST(self):
-            if not self.allowed(write=True) or self.path != "/cancel":
+            if read_only or not self.allowed(write=True) or self.path != "/cancel":
                 self.send_error(403)
                 return
             (job / "cancel.request").write_text("requested", encoding="ascii")
@@ -719,7 +786,14 @@ def serve(job, port, lan_ip=None, prefix=24, allow_all=False, allowed_hosts=None
         request_queue_size = 64
         daemon_threads = True
     addresses = ["0.0.0.0"] if allow_all else ["127.0.0.1"] + ([lan_ip] if lan_ip else [])
-    servers = [ReportServer((address, port), Handler) for address in addresses]
+    servers = []
+    try:
+        for address in addresses:
+            servers.append(ReportServer((address, port), Handler))
+    except BaseException:
+        for server in servers:
+            server.server_close()
+        raise
     if allow_all:
         print("REPORT_LISTEN 0.0.0.0; all source IPv4 clients may read registered private photos/originals; no authentication", flush=True)
     for address in ["127.0.0.1"] + ([lan_ip] if lan_ip else []):
@@ -738,6 +812,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("operation", choices=["init", "run", "serve"])
     parser.add_argument("--source", type=Path)
+    parser.add_argument("--output", type=Path, help="Explicit output job directory, outside the originals; does not write resource pointers")
     parser.add_argument("--job", type=Path)
     parser.add_argument("--node", type=Path, default=ROOT / ".tools" / "node-v24.11.1-win-x64" / "node.exe")
     parser.add_argument("--port", type=int, default=5174)
@@ -746,9 +821,11 @@ if __name__ == "__main__":
     parser.add_argument("--lan-prefix", type=int, default=24)
     parser.add_argument("--allow-all", action="store_true", help="Opt-in all-source read access on 0.0.0.0; private originals become reachable; POST stays loopback")
     parser.add_argument("--allowed-host", action="append", default=[], help="Additional exact local hostname/IPv4 accepted in Host")
+    parser.add_argument("--instance", help="Desktop controller instance identity, exposed by /health.json")
+    parser.add_argument("--read-only", action="store_true", help="Disable the legacy loopback cancel endpoint")
     args = parser.parse_args()
     if args.operation == "init":
-        initialize(args.source)
+        initialize(args.source, args.output)
     elif args.operation == "run":
         job_path = args.job.resolve(strict=True)
         lock = job_path / "run.lock"
@@ -762,4 +839,5 @@ if __name__ == "__main__":
         finally:
             lock.unlink(missing_ok=True)
     else:
-        serve(args.job.resolve(strict=True), args.port, args.lan_ip, args.lan_prefix, args.allow_all, args.allowed_host)
+        serve(args.job.resolve(strict=True), args.port, args.lan_ip, args.lan_prefix, args.allow_all, args.allowed_host,
+              args.instance, args.read_only)

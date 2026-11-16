@@ -54,7 +54,8 @@
     <p id="change-counts"></p>
     <div id="notice" class="notice" role="status" hidden></div>
     <div class="shoot-filter">
-      <label class="field shoot-field">地点 / 拍摄日期<select id="shoot-group" aria-describedby="shoot-group-status" disabled><option value="">全部拍摄组</option></select></label>
+      <label class="field">分类方式<select id="navigation-mode" aria-describedby="shoot-group-status" disabled><option value="date">拍摄日期</option><option value="folder">来源文件夹</option><option value="place">拍摄地点</option></select></label>
+      <label class="field shoot-field"><span id="shoot-group-label">地点 / 拍摄日期</span><select id="shoot-group" aria-describedby="shoot-group-status" disabled><option value="">全部拍摄组</option></select></label>
       <p id="shoot-group-status" role="status">地点 / 日期目录尚未准备，仍可浏览全部裁剪。</p>
     </div>
     <div class="toolbar" aria-label="图墙筛选与排序">
@@ -101,6 +102,7 @@
     const percent = value => number(value) && value >= 0 && value <= 1 ? (value * 100).toFixed(1) + '%' : '未判定';
     const isPreferred = item => item.decision === 'keep' && item.birdVerification?.status === 'bird';
     const hasRank = item => number(item.rank) && item.rank > 0;
+    const validFrameId = id => typeof id === 'string' && /^p(?:\d{6}|[a-f0-9]{24})$/.test(id);
     function incompleteVerification(verification) {
       if (verification?.status !== 'unknown' || verification.evidence?.status === 'completed') return false;
       return ['pending', 'processing', 'running', 'failed', 'error'].includes(verification.evidence?.status) ||
@@ -114,6 +116,33 @@
     }
     const badgeClass = value => value === 'bird' ? 'badge' : value === 'nonBird' ? 'badge nonbird' : 'badge review';
     const hasName = value => typeof value === 'string' && value.trim().length > 0;
+    const navigationLabels = { date: '拍摄日期', folder: '来源文件夹', place: '拍摄地点', legacy: '地点 / 拍摄日期' };
+    const navigationPreferences = (() => {
+      try {
+        const saved = JSON.parse(localStorage.getItem('birdshot.navigation.v1') || 'null');
+        return { mode: ['date', 'folder', 'place'].includes(saved?.mode) ? saved.mode : 'date', groups: saved?.groups && typeof saved.groups === 'object' && !Array.isArray(saved.groups) ? saved.groups : {} };
+      } catch { return { mode: 'date', groups: {} }; }
+    })();
+    function rememberNavigation() {
+      const mode = $('shoot-group').dataset.mode;
+      if (mode) navigationPreferences.groups[mode] = $('shoot-group').value;
+    }
+    function saveNavigation() {
+      rememberNavigation();
+      try { localStorage.setItem('birdshot.navigation.v1', JSON.stringify(navigationPreferences)); } catch { /* Browsing still works when storage is disabled. */ }
+    }
+    function validDirectory(groups) {
+      return Array.isArray(groups) && !groups.some(group => !group || !hasName(group.id) || !hasName(group.name) ||
+        ['photoCount', 'cropCount', 'preferredCount'].some(key => !Number.isInteger(group[key]) || group[key] < 0)) &&
+        new Set(groups.map(group => group.id)).size === groups.length;
+    }
+    function validNavigation(navigation) {
+      const modes = ['date', 'folder', 'place'];
+      if (!navigation || !Array.isArray(navigation.modes) || navigation.modes.length !== modes.length ||
+        new Set(navigation.modes).size !== modes.length || !modes.every(mode => navigation.modes.includes(mode) && validDirectory(navigation.groups?.[mode]))) return false;
+      const ids = Object.fromEntries(modes.map(mode => [mode, new Set(navigation.groups[mode].map(group => group.id))]));
+      return state.index.items.every(item => modes.every(mode => hasName(item.navigationGroups?.[mode]) && ids[mode].has(item.navigationGroups[mode])));
+    }
     const qualityLabel = quality => ({ '高可用原像素': '高像素', '标准可用原像素': '标准像素', '原图触边风险': '触边风险', '低像素细节受限': '低像素' })[quality?.tierLabel] || quality?.tierLabel || '未分级';
     function speciesCandidates(species) {
       const candidates = Array.isArray(species?.top3) ? species.top3 : species?.top5;
@@ -212,18 +241,26 @@
       return section;
     }
     function updateShootGroups() {
-      const select = $('shoot-group'), selected = select.value, groups = state.index?.shootGroups;
+      const select = $('shoot-group'), modeSelect = $('navigation-mode'), navigation = state.index?.navigation;
+      rememberNavigation();
+      const hasNavigation = navigation !== undefined && navigation !== null;
+      const navigationValid = hasNavigation && validNavigation(navigation);
+      modeSelect.disabled = !navigationValid;
+      modeSelect.value = navigationPreferences.mode;
+      const mode = navigationValid ? navigationPreferences.mode : 'legacy';
+      select.dataset.mode = mode;
+      $('shoot-group-label').textContent = navigationLabels[mode];
+      const selected = navigationPreferences.groups[mode], groups = navigationValid ? navigation.groups[mode] : hasNavigation ? undefined : state.index?.shootGroups;
       state.shootGroups.clear();
-      const all = el('option', '', '全部拍摄组'); all.value = '';
+      const all = el('option', '', mode === 'legacy' ? '全部拍摄组' : '全部' + navigationLabels[mode]); all.value = '';
       select.replaceChildren(all);
       select.disabled = true;
       let message = '';
-      if (groups === undefined || groups === null) message = '地点 / 日期目录尚未准备，仍可浏览全部裁剪。';
-      else if (!Array.isArray(groups) || groups.some(group => !group || !hasName(group.id) || !hasName(group.name) ||
+      if (hasNavigation && !navigationValid) message = '分类目录格式无效（navigation 或 navigationGroups），暂不启用分类筛选；仍可浏览全部裁剪，不改变技术排序。';
+      else if (groups === undefined || groups === null) message = '地点 / 日期目录尚未准备，仍可浏览全部裁剪。';
+      else if (!validDirectory(groups) || mode === 'legacy' && groups.some(group =>
         ![null, undefined].includes(group.date) && !hasName(group.date) ||
-        ![null, undefined].includes(group.placeName) && !hasName(group.placeName) ||
-        ['photoCount', 'cropCount', 'preferredCount'].some(key => !Number.isInteger(group[key]) || group[key] < 0)) ||
-        new Set(groups.map(group => group.id)).size !== groups.length) {
+        ![null, undefined].includes(group.placeName) && !hasName(group.placeName))) {
         message = '地点 / 日期目录格式无效，暂不启用分组筛选；仍可浏览全部裁剪。';
       } else {
         for (const group of groups) {
@@ -234,16 +271,17 @@
         select.disabled = !groups.length;
         if (state.shootGroups.has(selected)) select.value = selected;
       }
-      if (selected && !state.shootGroups.has(selected)) state.page = 1;
+      if (selected && !state.shootGroups.has(selected)) { state.page = 1; navigationPreferences.groups[mode] = ''; }
       $('shoot-group-status').setAttribute('role', message.includes('无效') ? 'alert' : 'status');
       $('shoot-group-status').dataset.notice = message;
       updateShootGroupStatus();
     }
     function updateShootGroupStatus() {
       const group = state.shootGroups.get($('shoot-group').value);
+      const mode = $('shoot-group').dataset.mode;
       $('shoot-group-status').textContent = $('shoot-group-status').dataset.notice || (group ?
         group.name + ' · 原图 ' + format(group.photoCount) + ' · 裁剪 ' + format(group.cropCount) + ' · 优选 ' + format(group.preferredCount) + '（目录计数）' :
-        '全部拍摄组 · ' + format(state.shootGroups.size) + ' 组；按地点与相机日期分组，不改变连拍与技术判断。');
+        (mode === 'legacy' ? '全部拍摄组' : '全部' + navigationLabels[mode]) + ' · ' + format(state.shootGroups.size) + ' 组；' + (mode === 'legacy' ? '按地点与相机日期分组，' : '仅筛选已有元数据，') + '不改变连拍与技术判断。');
     }
     function media(path) {
       if (typeof path !== 'string' || !path || path.includes('\\') || /[:\p{Cc}]/u.test(path)) throw new Error('裁剪媒体路径不是有效的本机相对路径');
@@ -253,7 +291,7 @@
       return '/media/' + parts.map(encodeURIComponent).join('/');
     }
     function groupUrl(id) {
-      if (typeof id !== 'string' || !/^g\d{5}$/.test(id)) throw new Error('组标识无效');
+      if (typeof id !== 'string' || !/^g(?:\d{5}|[a-f0-9]{24})$/.test(id)) throw new Error('组标识无效');
       return '/gallery/group/' + encodeURIComponent(id) + '.json';
     }
     async function json(url, signal) {
@@ -319,7 +357,7 @@
     function filteredItems(pool = state.pool) {
       const query = $('search').value.trim().toLocaleLowerCase();
       let items = state.index.items.filter(item => pool === 'preferred' ? isPreferred(item) : !isPreferred(item));
-      if ($('shoot-group').value) items = items.filter(item => item.shootGroup?.id === $('shoot-group').value);
+      if ($('shoot-group').value) items = items.filter(item => ($('shoot-group').dataset.mode === 'legacy' ? item.shootGroup?.id : item.navigationGroups?.[$('shoot-group').dataset.mode]) === $('shoot-group').value);
       if ($('tier').value) items = items.filter(item => String(item.quality?.tier) === $('tier').value);
       if (pool === 'review' && $('verification').value) items = items.filter(item => $('verification').value === 'pending' ? incompleteVerification(item.birdVerification) :
         item.birdVerification.status === $('verification').value && !incompleteVerification(item.birdVerification));
@@ -680,7 +718,7 @@
       $('photo-viewer').showModal();
       const geometry = sizePreviewImage(preview, preview.current, preview.mode, true);
       state.photo.maxScale = preview.mode === 'original' && geometry ? Math.max(1, geometry.sourceWidth / geometry.width) : 8;
-      $('photo-download').hidden = !/^p\d{6}$/.test(preview.frame.id);
+      $('photo-download').hidden = !validFrameId(preview.frame.id);
       if (!$('photo-download').hidden) $('photo-download').href = '/original/' + encodeURIComponent(preview.frame.id) + '?download=1';
       transformPhoto();
       preview.notify();
@@ -755,7 +793,7 @@
         if (!valid) svg.replaceChildren();
         return valid;
       };
-      const validFrame = /^p\d{6}$/.test(frame.id) && number(frame.width) && frame.width > 0 && number(frame.height) && frame.height > 0;
+      const validFrame = validFrameId(frame.id) && number(frame.width) && frame.width > 0 && number(frame.height) && frame.height > 0;
       if (!validFrame) toggle.title = '缺少原图尺寸或照片标识，无法选择清晰预览';
       const loadedText = () => {
         if (preview.mode === 'crop') return '鸟体裁剪 · 点击图片放大';
@@ -1000,6 +1038,12 @@
         switchPool(event.key === 'Home' ? 'preferred' : event.key === 'End' ? 'review' : state.pool === 'preferred' ? 'review' : 'preferred', true);
       }
     });
+    $('navigation-mode').addEventListener('change', () => {
+      rememberNavigation();
+      navigationPreferences.mode = $('navigation-mode').value;
+      state.page = 1; updateShootGroups(); saveNavigation(); render();
+    });
+    $('shoot-group').addEventListener('change', saveNavigation);
     for (const id of ['shoot-group', 'search', 'tier', 'verification', 'sort', 'collapse', 'page-size']) $(id).addEventListener(id === 'search' ? 'input' : 'change', () => { state.page = 1; render(); });
     function changePage(delta) { state.page += delta; render(); $('gallery').scrollIntoView({ block: 'start' }); }
     $('previous').addEventListener('click', () => changePage(-1));
