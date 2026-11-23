@@ -4,6 +4,7 @@ const { contextBridge, ipcRenderer } = require('electron')
 if (process.isMainFrame) {
   contextBridge.exposeInMainWorld('birdshotDesktop', Object.freeze({
     getState: () => ipcRenderer.invoke('birdshot:state'),
+    checkForUpdates: () => ipcRenderer.invoke('birdshot:check-updates'),
     chooseSource: () => ipcRenderer.invoke('birdshot:choose-source'),
     attachExisting: () => ipcRenderer.invoke('birdshot:attach-existing'),
     chooseOutput: () => ipcRenderer.invoke('birdshot:choose-output'),

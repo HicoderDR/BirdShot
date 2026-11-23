@@ -3,11 +3,12 @@ import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
 import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { randomUUID } from 'node:crypto'
-import { appendFile, mkdir } from 'node:fs/promises'
+import { appendFile, mkdir, readFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { trustedSender, externalReference, networkSettings } from './security.mjs'
+import { checkUpdates } from './updates.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const page = path.join(here, 'renderer', 'index.html')
@@ -93,10 +94,10 @@ async function launchBackend() {
   try { await ready } finally { clearTimeout(timeout) }
 }
 
-function handler(channel, callback) {
+function handler(channel, callback, requireRuntime = true) {
   ipcMain.handle(channel, async (event, ...args) => {
     if (!window || !trustedSender(event, window.webContents, pageUrl)) throw new Error('此操作仅限当前桌面管理窗口')
-    await ready
+    if (requireRuntime) await ready
     return callback(...args)
   })
 }
@@ -110,6 +111,11 @@ async function choose(action, title) {
 }
 
 function registerIpc() {
+  handler('birdshot:check-updates', async () => {
+    const version = app.isPackaged ? app.getVersion() :
+      JSON.parse(await readFile(path.resolve(here, '..', 'package.json'))).desktopVersion
+    return checkUpdates(version, fetch, process.env.BIRDSHOT_OFFLINE === '1')
+  }, false)
   handler('birdshot:state', () => command('state'))
   handler('birdshot:choose-source', () => choose('add_source', '添加照片文件夹（原片只读）'))
   handler('birdshot:attach-existing', () => choose('attach_job', '加载已有BirdShot批次输出（不重跑模型）'))

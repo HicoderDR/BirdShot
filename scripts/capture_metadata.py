@@ -91,11 +91,15 @@ def parse_capture(detail, gps):
     return capture
 
 
-def extract(job):
+def extract(job, photo_ids=None, include_region=True):
     manifest = json.loads((job / "manifest.json").read_text(encoding="utf-8"))
     source = Path(manifest["source"]).resolve(strict=True)
-    rows, counts = {}, Counter()
+    target = job / "revisions" / "capture-exif-v1.json"
+    rows = json.loads(target.read_text(encoding="utf-8"))["photos"] if photo_ids is not None and target.exists() else {}
+    wanted = set(photo_ids) if photo_ids is not None else None
     for photo in manifest["photos"]:
+        if wanted is not None and (photo["id"] not in wanted or photo["id"] in rows):
+            continue
         original = photo["primary"]
         path = (source / original["relative"]).resolve()
         try:
@@ -115,17 +119,21 @@ def extract(job):
         except (OSError, ValueError, TypeError, UnicodeError) as error:
             capture = {"status": "error", "time": None, "timeZone": None, "timeSource": None,
                        "location": None, "locationNote": f"{original['relative']}: {error}"}
+        rows[photo["id"]] = {"sourceRelative": original["relative"], "capture": capture,
+                             "sourceSizeBytes": original["size"], "sourceMtimeNs": original["mtimeNs"]}
+    counts = Counter()
+    for row in rows.values():
+        capture = row["capture"]
         counts["photos"] += 1
         counts["timeAvailable"] += bool(capture["time"])
         counts["timeZoneAvailable"] += bool(capture["timeZone"])
         counts["gpsAvailable"] += capture["location"] is not None
         counts["errors"] += capture["status"] == "error"
-        rows[photo["id"]] = {"sourceRelative": original["relative"], "capture": capture,
-                             "sourceSizeBytes": original["size"], "sourceMtimeNs": original["mtimeNs"]}
     result = {"version": VERSION, "source": "Original JPEG EXIF; paired RAW not parsed",
               "userRegionReference": "中国江苏（用户提供的地区参考，非EXIF拍摄地点）",
               "statistics": dict(counts), "photos": rows}
-    target = job / "revisions" / "capture-exif-v1.json"
+    if not include_region:
+        result.pop("userRegionReference", None)
     target.parent.mkdir(parents=True, exist_ok=True)
     atomic(target, result)
     return result["statistics"]

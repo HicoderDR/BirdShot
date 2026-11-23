@@ -2,7 +2,7 @@
 
 本地鸟类筛片研究 Demo：**读取照片 → YOLO 鸟体/分割 → 候选姿态与原像素局部纹理 → Birder 验鸟 → 同对象组内技术推荐 → 人工覆核**。模型不上传个人照片，不删除、移动或改写原 JPEG / RAW。报告默认受限，可显式开启全来源只读浏览；开启后可达客户端会收到照片、原图及登记元数据。
 
-**桌面版**：新增Windows x64 Electron入口，完整便携包随附Python/Node、实际YOLO/姿态/Birder模型和中英文名录；系统选择文件夹、多来源持久库、旧批次兼容、日期/文件夹/地点筛选与可控网络共享。开发、打包、许可、离线边界及故障排查见[桌面版说明](docs/desktop.md)。它与原PWA并存，网络服务默认仅本机且新端口5274，不接管旧5174。
+**桌面版 0.3.0**：Windows x64当前用户离线安装器，可选安装位置、开始菜单和标准卸载，随附精简Python/Node、实际YOLO/姿态/Birder模型与中英文名录。系统选择文件夹、多来源持久库、旧批次兼容、日期/文件夹/地点筛选与可控共享保持。导入现在按连拍组增量发布，显示真实处理阶段，不等全目录完成才浏览；“检查新增照片”复用旧缓存。另有手动官方更新检查，不自动执行升级。构建、性能实测、安装/卸载、数据保留、许可及离线边界见[桌面版说明](docs/desktop.md)。原0.2.0便携包和PWA保留；网络默认仅本机5274，不接管旧5174。
 
 ## 当前功能与边界
 
@@ -173,7 +173,7 @@ Wikimedia繁忙或无合适授权小图时，有限尝试iNaturalist备源：精
 npm.cmd run test:culling
 npm.cmd run lint
 npm.cmd run build
-& $python -m unittest discover -s tests -p "test_*.py"
+& $python -X utf8 -m unittest discover -s tests -p "test_*.py"
 node tests\gallery-report.test.mjs
 ```
 

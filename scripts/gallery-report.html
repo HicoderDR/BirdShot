@@ -426,6 +426,7 @@
       }
     }
     async function refresh() {
+      const scroll = [window.scrollX, window.scrollY];
       clearTimeout(state.timer);
       if (state.request) state.request.abort();
       const controller = new AbortController();
@@ -441,6 +442,7 @@
         updateSummary();
         setNotice(data.status === 'error' ? '本地验鸟或质量索引处理失败。下方仅为该版索引已写入的部分结果，并非全量完成；请查看处理日志后刷新。' : '', data.status === 'error');
         render();
+        if (state.index) window.scrollTo(...scroll);
         if (data.status === 'processing') state.timer = setTimeout(refresh, 10000);
       } catch (error) {
         if (controller.signal.aborted) return;
@@ -464,6 +466,13 @@
       } finally {
         if (state.request === controller) { $('refresh').disabled = false; state.request = null; }
       }
+      window.addEventListener('message', event => {
+        const parentFrame = event.source === window.parent;
+        const siblingBridge = window.parent !== window && window.parent.frames[0] === window && event.source === window.parent.frames[1];
+        if (event.origin !== location.origin || (!parentFrame && !siblingBridge) || window.parent === window ||
+            !event.data || event.data.type !== 'birdshot:refresh-index' || Object.keys(event.data).length !== 1) return;
+        refresh();
+      });
     }
     function switchPool(pool, focus = false) {
       state.pool = pool;

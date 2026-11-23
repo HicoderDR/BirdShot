@@ -14,6 +14,7 @@ export function externalReference(value) {
     }
     if (['www.inaturalist.org', 'inaturalist.org'].includes(url.hostname)) return /^\/photos\/\d+$/.test(url.pathname)
     if (url.hostname === 'commons.wikimedia.org') return url.pathname.startsWith('/wiki/')
+    if (url.hostname === 'github.com') return /^\/HicoderDR\/BirdShot\/releases\/tag\/birdshot-desktop-v\d+\.\d+\.\d+$/.test(url.pathname) && !url.search && !url.hash
     return url.hostname === 'creativecommons.org' && /^\/(?:licenses|publicdomain)\//.test(url.pathname)
   } catch {
     return false

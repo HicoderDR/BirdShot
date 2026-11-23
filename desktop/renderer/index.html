@@ -7,6 +7,7 @@
   <title>BirdShot · 本机照片库</title>
   <link rel="stylesheet" href="style.css">
   <script src="app.js" defer></script>
+  <script src="updates.js" defer></script>
 </head>
 <body>
   <header class="app-header">
@@ -58,6 +59,12 @@
         <button id="apply-suggested-port" type="button" hidden>使用建议端口</button>
         <div id="service-addresses" aria-label="服务就绪地址"></div>
         <p class="muted">仅本机不向其他设备开放；共享设置由主进程检查并应用。端口冲突不会终止或接管已有服务。</p>
+      </details>
+      <details id="update-settings">
+        <summary>应用更新</summary>
+        <p id="update-status" role="status">手动检查GitHub官方桌面发行；不会自动下载执行安装器。</p>
+        <button id="check-updates" type="button">检查更新</button>
+        <a id="update-page" href="https://github.com/HicoderDR/BirdShot/releases" target="_blank" rel="noopener noreferrer" hidden>打开官方发行页</a>
       </details>
     </aside>
     <main>

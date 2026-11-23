@@ -87,7 +87,7 @@ function renderSources(sources) {
       const total = source.progress.total ?? totalPhotos
       const valid = Number.isFinite(processed) && processed >= 0 && Number.isFinite(total) && total >= processed
       const progress = node('progress')
-      progress.setAttribute('aria-label', (source.name || '来源') + '处理进度')
+      progress.setAttribute('aria-label', (source.name || '来源') + '原图检测提交进度')
       if (valid && total > 0) { progress.max = total; progress.value = processed }
       card.append(progress, node('p', [phase, valid ? processed + ' / ' + total : '进度等待更新', progressMessage].filter(Boolean).join(' · '), 'source-progress'))
       const counts = [
@@ -96,14 +96,32 @@ function renderSources(sources) {
         Number.isInteger(cropCount) ? '裁剪 ' + cropCount : '',
       ].filter(Boolean)
       if (counts.length) card.append(node('p', counts.join(' · '), 'source-progress'))
+      if (Array.isArray(source.progress.stages)) {
+        const stages = node('ol', undefined, 'source-progress')
+        const statuses = { pending: '尚未开始', running: '正在处理', partial: '部分已完成', completed: '已完成', error: '失败' }
+        const units = { photos: '张', groups: '组', crops: '个裁剪' }
+        for (const stage of source.progress.stages) {
+          const measured = Number.isInteger(stage.processed) && Number.isInteger(stage.total) && stage.total >= stage.processed
+          stages.append(node('li', (stage.label || stage.id) + ' · ' + (statuses[stage.status] || stage.status) +
+            (measured && stage.total > 0 ? ' · ' + stage.processed + ' / ' + stage.total + ' ' + (units[stage.unit] || '') : '') +
+            (stage.error ? ' · ' + stage.error : '')))
+        }
+        card.append(stages)
+      }
     }
     if (source.error) {
       const error = node('p', source.error, 'source-error')
       error.setAttribute('role', 'alert')
       card.append(error)
     }
+    if (source.scanRequested) card.append(node('p', '已请求检查新增照片；当前快照安全完成后再检查一轮', 'source-progress'))
+    for (const issue of source.sourceIssues || []) card.append(node('p', issue.path + ' · ' + issue.message, 'source-error'))
+    for (const tail of source.historyTails || []) {
+      card.append(node('p', 'history-tail · ' + (tail.reason || '准备历史尾组对比') +
+        ' · 打开本组任一裁剪 → 鸟体对比，可查看历史缓存与新增照片。', 'source-progress'))
+    }
     const buttons = node('div', undefined, 'source-buttons')
-    const scan = node('button', ['error', 'failed', 'missing', 'paused'].includes(source.status) ? '恢复 / 重新扫描' : '重新扫描')
+    const scan = node('button', ['error', 'failed', 'missing', 'paused'].includes(source.status) ? '恢复 / 检查新增照片' : '检查新增照片')
     scan.type = 'button'
     scan.addEventListener('click', () => action('rescan', source.id))
     const remove = node('button', '移除（仅解绑）')
@@ -149,6 +167,17 @@ function renderService(service) {
       $('gallery-frame').hidden = true
       message('正在载入图库', '正在连接本机报告服务；若长时间未显示，请检查服务状态并重新加载图库。')
       $('gallery-frame').src = url
+      if (location.protocol === 'file:') {
+        let bridge = $('gallery-refresh-bridge')
+        if (!bridge) {
+          bridge = node('iframe')
+          bridge.id = 'gallery-refresh-bridge'
+          bridge.hidden = true
+          bridge.title = '仅传递图库刷新通知'
+          document.body.append(bridge)
+        }
+        bridge.src = new URL('/gallery-refresh-bridge', url).href
+      }
     }
   } else {
     frameUrl = ''
@@ -176,6 +205,14 @@ function reloadGallery() {
   $('gallery-frame').src = frameUrl
 }
 
+function refreshGalleryIndex() {
+  if (!frameUrl) return
+  const frame = $('gallery-frame')
+  if (frame.getAttribute('src') !== frameUrl) return
+  const target = location.protocol === 'file:' ? $('gallery-refresh-bridge') : frame
+  target?.contentWindow?.postMessage({ type: 'birdshot:refresh-index' }, new URL(frameUrl).origin)
+}
+
 function render(next) {
   if (!next || next.version !== 1 || !Array.isArray(next.sources) || !next.runtime || !next.service) throw new Error('桌面库状态格式无效')
   const previous = current
@@ -190,7 +227,9 @@ function render(next) {
   if (!$('model-list').childElementCount) $('model-list').append(node('li', '尚无模型状态；本地处理前需准备运行环境。'))
   renderSources(next.sources)
   renderService(next.service)
-  if (previous && frameUrl === previousFrameUrl && gallerySourcesChanged(previous.sources, next.sources)) reloadGallery()
+  if (previous && frameUrl === previousFrameUrl &&
+      (previous.viewRevision !== next.viewRevision || gallerySourcesChanged(previous.sources, next.sources) ||
+       next.sources.some(source => source.progress?.publishedRevision !== previous.sources.find(old => old.id === source.id)?.progress?.publishedRevision))) refreshGalleryIndex()
   setBusy(busy)
 }
 

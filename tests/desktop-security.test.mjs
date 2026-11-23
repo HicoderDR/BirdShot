@@ -12,7 +12,9 @@ test('only the exact privileged local main frame may manage the library', () => 
 test('external links are encyclopedia/attribution HTTPS only, not a command bridge', () => {
   assert.equal(externalReference('https://zh.wikipedia.org/wiki/八哥'), true)
   assert.equal(externalReference('https://www.inaturalist.org/photos/78846863'), true)
-  for (const url of ['file:///C:/Windows/system.ini', 'javascript:alert(1)', 'https://evil.invalid/', 'https://user:pass@zh.wikipedia.org/wiki/Bird']) {
+  assert.equal(externalReference('https://github.com/HicoderDR/BirdShot/releases/tag/birdshot-desktop-v0.3.0'), true)
+  for (const url of ['file:///C:/Windows/system.ini', 'javascript:alert(1)', 'https://evil.invalid/',
+    'https://github.com/other/repo/releases/tag/birdshot-desktop-v0.3.0', 'https://user:pass@zh.wikipedia.org/wiki/Bird']) {
     assert.equal(externalReference(url), false)
   }
 })

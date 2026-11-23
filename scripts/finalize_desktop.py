@@ -54,6 +54,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--directory", type=Path, default=ROOT / "desktop-artifacts" / "BirdShot-win32-x64")
+    version = json.loads((ROOT / "package.json").read_text())["desktopVersion"]
+    parser.add_argument("--directory", type=Path, default=ROOT / "desktop-artifacts" / f"BirdShot-{version}-win32-x64")
     parser.add_argument("--source-ref", default="refs/birdshot-publications/desktop")
     main(parser.parse_args())

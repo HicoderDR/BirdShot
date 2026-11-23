@@ -6,6 +6,9 @@ import { createServer } from 'node:http'
 import { chromium } from 'playwright'
 
 const gallery = await readFile(new URL('../scripts/gallery-report.html', import.meta.url))
+const bridge = (await readFile(new URL('../scripts/batch_culling.py', import.meta.url), 'utf8'))
+  .match(/data = b"""(<!doctype html>[\s\S]*?)"""/)?.[1]
+assert.ok(bridge, 'Use the actual unprivileged HTTP bridge, not a second implementation')
 const desktopFiles = new Map(await Promise.all(['index.html', 'app.js', 'style.css'].map(async name => [
   '/desktop/' + name, await readFile(new URL('../desktop/renderer/' + name, import.meta.url)),
 ])))
@@ -52,6 +55,8 @@ const server = createServer((request, response) => {
   if (desktopFiles.has(path)) {
     response.setHeader('Content-Type', path.endsWith('.html') ? 'text/html; charset=utf-8' : path.endsWith('.js') ? 'text/javascript' : 'text/css')
     response.end(desktopFiles.get(path))
+  } else if (path === '/gallery-refresh-bridge') {
+    response.setHeader('Content-Type', 'text/html; charset=utf-8'); response.end(bridge)
   } else if (['/', '/gallery/'].includes(path)) {
     response.setHeader('Content-Type', 'text/html; charset=utf-8'); response.end(gallery)
   } else if (path === '/gallery.json') {
@@ -231,7 +236,7 @@ try {
   })
   assert.match(await management.locator('[data-source-id="synthetic-source"]').textContent(), /原图 3 \/ 10 · 组 1 \/ 2 · 裁剪 4/)
   assert.equal(await management.locator('[data-source-id="synthetic-source"] progress').getAttribute('value'), '3')
-  await management.locator('[data-source-id="synthetic-source"]').getByRole('button', { name: '恢复 / 重新扫描' }).click()
+  await management.locator('[data-source-id="synthetic-source"]').getByRole('button', { name: '恢复 / 检查新增照片' }).click()
   await management.locator('[data-source-id="synthetic-old"]').getByRole('button', { name: '移除（仅解绑）' }).click()
   assert.deepEqual(await management.evaluate(() => testDesktop.calls.filter(call => ['rescan', 'removeSource'].includes(call.method))), [
     { method: 'rescan', args: ['synthetic-source'] }, { method: 'removeSource', args: ['synthetic-old'] },
@@ -284,12 +289,23 @@ try {
     testDesktop.emit(next)
   })
   await frame.locator('.tile').first().waitFor()
-  assert.equal(galleryLoads(), emptyLoads + 1, '同URL来源集合改变后重新读取原本completed且不轮询的空图库')
+  assert.equal(galleryLoads(), emptyLoads, '来源集合改变只刷新索引，不重新导航iframe')
   await frame.locator('#shoot-group').selectOption('source-b/photos')
   await frame.locator('.tile-open').first().click()
   await frame.locator('#focus-panel .crop-wrap img:visible').click()
   await frame.locator('#photo-viewer[open]').waitFor()
   const processingLoads = galleryLoads()
+  const indexReads = () => requests.filter(path => path === '/gallery.json').length
+  const beforeInvalidMessages = indexReads()
+  await frame.locator('body').evaluate(() => {
+    for (const [origin, source, data] of [
+      ['https://invalid.example', parent, { type: 'birdshot:refresh-index' }],
+      [location.origin, window, { type: 'birdshot:refresh-index' }],
+      [location.origin, parent, { type: 'birdshot:refresh-index', action: 'inference' }],
+    ]) window.dispatchEvent(new MessageEvent('message', { origin, source, data }))
+  })
+  await management.waitForTimeout(100)
+  assert.equal(indexReads(), beforeInvalidMessages, '刷新通知严格限定同源父frame与单一无IPC消息')
   await management.evaluate(() => {
     for (let processed = 2; processed <= 4; processed++) {
       const next = testDesktop.state()
@@ -307,7 +323,8 @@ try {
     testDesktop.emit(next)
   })
   await frame.locator('#status').filter({ hasText: '索引已完成' }).waitFor()
-  assert.equal(galleryLoads(), processingLoads + 1, 'processing→completed在同URL重新读取最终索引')
+  assert.equal(galleryLoads(), processingLoads, 'processing→completed只刷新最终索引')
+  assert.equal(await frame.locator('#photo-viewer').evaluate(element => element.open), true, '最终发布仍保留已打开viewer')
   assert.equal(await frame.locator('#shoot-group').inputValue(), 'source-b/photos', '最终加载保留仍合法的localStorage筛选')
   assert.equal(await frame.locator('.tile').count(), 26)
   assert.equal(await management.locator('#gallery-frame').getAttribute('src'), origin + '/gallery/')
@@ -316,7 +333,7 @@ try {
     testDesktop.emit(testDesktop.state())
   })
   await management.waitForTimeout(150)
-  assert.equal(galleryLoads(), processingLoads + 1, '重复completed状态事件去重')
+  assert.equal(galleryLoads(), processingLoads, '重复completed状态事件去重')
   for (const localUrl of ['https://example.invalid/', 'http://localhost:5275/', 'http://127.0.0.1:5275@evil.invalid/', 'file:///SYNTHETIC:/photos']) {
     await management.evaluate(localUrl => {
       const next = testDesktop.state()
@@ -344,8 +361,45 @@ try {
   assert.match(await rejected.locator('#gallery-message').textContent(), /无法读取本机照片库/)
   assert.equal(await rejected.locator('#refresh-state').isEnabled(), true)
   await rejected.close()
+  payload = fixture()
+  const fileManager = await browser.newPage()
+  fileManager.on('pageerror', error => errors.push(error.message))
+  await fileManager.addInitScript(({ origin }) => {
+    if (location.protocol !== 'file:') return
+    let listener
+    const current = {
+      version: 1, runtime: { ready: false, models: [] }, outputRoot: 'SYNTHETIC', sources: [],
+      service: { status: 'ready', mode: 'local', localUrl: origin + '/gallery/', lanUrls: [] },
+    }
+    window.emitFileState = revision => {
+      current.sources = [{ id: 'public-fixture', name: '公开测试', path: 'SYNTHETIC', status: 'processing',
+        progress: { publishedRevision: revision, processedPhotos: 2, totalPhotos: 3, completedGroups: 1, totalGroups: 2 } }]
+      listener(structuredClone(current))
+    }
+    window.birdshotDesktop = { getState: async () => structuredClone(current), onState: callback => { listener = callback; return () => {} } }
+  }, { origin })
+  await fileManager.goto(new URL('../desktop/renderer/index.html', import.meta.url).href)
+  const fileFrame = fileManager.frameLocator('#gallery-frame')
+  await fileFrame.locator('.tile-open').first().waitFor()
+  await fileManager.waitForFunction(() => document.getElementById('gallery-refresh-bridge')?.contentWindow)
+  await fileFrame.locator('.tile-open[data-item-id="synthetic-3"]').click()
+  await fileFrame.locator('#focus-panel .crop-wrap img:visible').click()
+  await fileFrame.locator('#photo-viewer[open]').waitFor()
+  const fileLoads = requests.filter(path => path === '/gallery/').length
+  payload.status = 'processing'
+  await fileManager.evaluate(() => emitFileState(1))
+  await fileFrame.locator('#status').filter({ hasText: '本地处理中' }).waitFor()
+  assert.equal(requests.filter(path => path === '/gallery/').length, fileLoads, 'file-origin桌面通过同源只读bridge刷新，不能重载iframe')
+  assert.equal(await fileFrame.locator('#photo-viewer').evaluate(element => element.open), true)
+  payload.updatedAt = '2026-11-17T12:00:00Z'
+  await fileManager.evaluate(() => emitFileState(2))
+  const fileGallery = fileManager.frames().find(candidate => candidate.url() === origin + '/gallery/')
+  await fileGallery.waitForFunction(() => state.index.updatedAt === '2026-11-17T12:00:00Z', undefined, { timeout: 5000 })
+  assert.equal(await fileFrame.locator('#photo-viewer').evaluate(element => element.open), true, '逐组revision发布仍保留当前历史详情')
+  assert.equal(requests.filter(path => path === '/gallery/').length, fileLoads)
+  await fileManager.close()
   assert.deepEqual(errors, [])
-  console.log('PASS: synthetic desktop manager + navigation, stable IDs/viewer, same-URL source completion refresh without progress reload, persistence, invalid metadata, conflict and sharing consent')
+  console.log('PASS: desktop manager + navigation, HTTP/file-origin revision refresh, stable IDs/viewer without reload, persistence, strict message origins, invalid metadata, conflict and sharing consent')
 } finally {
   await browser?.close()
   await new Promise(resolve => server.close(resolve))

@@ -13,11 +13,13 @@ import { fileURLToPath } from 'node:url'
 assert.equal(process.platform, 'win32')
 assert.equal(process.env.BIRDSHOT_TEST_PACKAGED, '1', 'Explicitly opt in to starting the packaged app')
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const built = path.resolve(process.env.BIRDSHOT_DESKTOP_DIRECTORY || path.join(root, 'desktop-artifacts', 'BirdShot-win32-x64'))
-const temp = process.env.BIRDSHOT_REUSE_VALIDATION || await mkdtemp(path.join(os.tmpdir(), 'BirdShot 桌面 验证 '))
+const version = JSON.parse(await readFile(path.join(root, 'package.json'))).desktopVersion || '0.2.0'
+const built = path.resolve(process.env.BIRDSHOT_DESKTOP_DIRECTORY || path.join(root, 'desktop-artifacts', `BirdShot-${version}-win32-x64`))
+const temp = process.env.BIRDSHOT_REUSE_VALIDATION || process.env.BIRDSHOT_VALIDATION_ROOT ||
+  await mkdtemp(path.join(os.tmpdir(), 'BirdShot 桌面 验证 '))
 console.log(JSON.stringify({ validationRoot: temp, phase: 'packaged-relocation' }))
-const relocated = path.join(temp, '便携 App')
-await rename(built, relocated)
+const relocated = process.env.BIRDSHOT_TEST_INSTALLED === '1' ? built : path.join(temp, '便携 App')
+if (process.env.BIRDSHOT_TEST_INSTALLED !== '1') await rename(built, relocated)
 const data = path.join(temp, '干净 用户配置'), sources = [path.join(temp, '来源甲', '同名 照片'), path.join(temp, '来源乙', '同名 照片')]
 await mkdir(data, { recursive: true })
 for (const source of sources) await mkdir(source, { recursive: true })
@@ -28,7 +30,8 @@ const env = { ...process.env, PATH: path.join(process.env.SystemRoot, 'System32'
 for (const key of Object.keys(env)) if (/^(PYTHONHOME|PYTHONPATH|VIRTUAL_ENV|ELECTRON_RUN_AS_NODE|DONGNIAO_API_KEY|GH_TOKEN|GITHUB_TOKEN|COPILOT_GH_ACCOUNT_)/.test(key)) delete env[key]
 const hash = data => createHash('sha256').update(data).digest('hex')
 const files = [path.join(sources[0], '连续 鸟 1.jpg'), path.join(sources[0], '连续 鸟 2.jpg'), path.join(sources[1], '公开 双鸟.jpg')]
-const proof = { version: '0.2.0', packaged: true, relocatedUnicodeAndSpaces: true, systemNodePythonPathRemoved: true,
+const proof = { version, packaged: true, installed: process.env.BIRDSHOT_TEST_INSTALLED === '1',
+  relocatedUnicodeAndSpaces: true, systemNodePythonPathRemoved: true,
   publicFixturesWithControlledExif: true, reusingCompletedPublicJobs: !!process.env.BIRDSHOT_REUSE_VALIDATION }
 let app, blocker
 try {
@@ -195,5 +198,5 @@ print('Public licensed birds with explicitly controlled EXIF dates; not private 
     await app.close()
   }
   if (blocker) await new Promise(resolve => blocker.close(resolve))
-  await rename(relocated, built)
+  if (process.env.BIRDSHOT_TEST_INSTALLED !== '1') await rename(relocated, built)
 }

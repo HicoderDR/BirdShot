@@ -171,7 +171,7 @@ def inventory(source, exclude_paths=None):
     }
 
 
-def initialize(source, output=None, exclude_paths=None):
+def initialize(source, output=None, exclude_paths=None, snapshot=None):
     source = source.resolve(strict=True)
     if not source.is_dir():
         raise ValueError("源目录不存在")
@@ -179,7 +179,7 @@ def initialize(source, output=None, exclude_paths=None):
     if job.is_relative_to(source):
         raise ValueError("输出不能位于原片目录内")
     job.parent.mkdir(parents=True, exist_ok=True)
-    manifest = inventory(source, exclude_paths)
+    manifest = snapshot if snapshot is not None else inventory(source, exclude_paths)
     free = shutil.disk_usage(job.parent).free
     if free < 1024 * 1024 * 1024:
         raise RuntimeError("可用空间不足1GiB，未创建输出")
@@ -274,6 +274,7 @@ class PolicyWorker:
     def close(self):
         self.process.stdin.close()
         self.process.wait(timeout=15)
+        self.process.stdout.close()
 
 
 def empty_frame(photo, group, issue):
@@ -283,7 +284,7 @@ def empty_frame(photo, group, issue):
             "instances": [], "selectedInstance": None, "bodySharpness": None, "bodyPixels": 0, "basis": None}
 
 
-def recover_completed(job, manifest, state):
+def recover_completed(job, manifest, state, skip_source_groups=None):
     source = Path(manifest["source"]).resolve()
     groups = read_json(job / "groups.json")
     mapping = {"sourceRoot": str(source), "versions": manifest["versions"], "crops": []}
@@ -300,7 +301,8 @@ def recover_completed(job, manifest, state):
             raise RuntimeError("已完成组的模型/策略版本不一致")
         frames = result["frames"]
         for frame in frames:
-            if frame.get("sourceSha256"):
+            if frame.get("sourceSha256") and group["id"] not in (skip_source_groups or set()) and (
+                    not frame.get("historicalOrigin") or frame["historicalOrigin"]["compatible"]):
                 original = (source / frame["source"]["primary"]["relative"]).resolve()
                 if not original.is_relative_to(source) or digest(original) != frame["sourceSha256"]:
                     raise RuntimeError("已完成组的原片指纹改变，拒绝混用缓存")
@@ -310,7 +312,7 @@ def recover_completed(job, manifest, state):
                 raise RuntimeError("缓存裁剪完整性校验失败")
             if record.get("selected") and digest(job / record["selectedPath"]) != record["cropSha256"]:
                 raise RuntimeError("缓存选中裁剪完整性校验失败")
-        group.update(status="done",
+        group.update(status="pending" if result.get("phase") == "extending" else "done",
                      thumbnail=next((b["thumbnail"] for f in frames for b in f["instances"] if b.get("thumbnail")), None),
                      selected=sum(f["decision"] == "keep" and bool(f.get("selectedCrop")) for f in frames),
                      review=sum(f["decision"] == "review" and f.get("processingStatus") == "ok" for f in frames),
@@ -331,22 +333,25 @@ def recover_completed(job, manifest, state):
     return groups, mapping
 
 
-def run(job, node, threads=4):
+def run(job, node, threads=4, on_detected=None, on_group=None, on_progress=None, skip_groups=None):
     manifest, state = read_json(job / "manifest.json"), read_json(job / "status.json")
     if manifest["versions"] != versions():
         raise RuntimeError("模型或策略版本已变化，不能混用旧任务缓存")
     source = Path(manifest["source"]).resolve(strict=True)
-    groups, mapping = recover_completed(job, manifest, state)
+    groups, mapping = recover_completed(job, manifest, state, set(skip_groups or []))
     photos = {p["id"]: p for p in manifest["photos"]}
     state.update({"status": "running", "startedAt": state["startedAt"] or datetime.now().isoformat(), "phase": "载入本机CPU模型"})
     atomic_json(job / "status.json", state)
-    worker = None
+    worker, detector = None, None
+    skipped = set(skip_groups or [])
     try:
-        detector = NativeDetector(threads)
-        worker = PolicyWorker(node)
         (job / "cancel.request").unlink(missing_ok=True)
         for group in groups:
+            if group["id"] in skipped:
+                continue
             if group["status"] == "done":
+                if on_group:
+                    on_group(group, read_json(job / "groups" / f"{group['id']}.json"), state)
                 continue
             if (job / "cancel.request").exists():
                 state.update(status="paused", phase="已安全暂停，已完成组保留，可恢复")
@@ -354,13 +359,37 @@ def run(job, node, threads=4):
             group["status"] = "running"
             state["currentGroup"] = group["id"]
             atomic_json(job / "groups.json", groups)
+            if on_progress:
+                on_progress("before_group", "开始连拍组检测", group, state)
+            cached_path = job / "groups" / f"{group['id']}.json"
+            cached = read_json(cached_path) if cached_path.exists() else {}
+            cached_frames = {frame["id"]: frame for frame in cached.get("frames", [])} if cached.get("phase") == "extending" else {}
+            if cached_frames:
+                mapping["crops"] = [row for row in mapping["crops"] if row["groupId"] != group["id"]]
+                state["processedPhotos"] -= len(cached_frames)
+                state["completedGroups"] -= 1
+                state["cropCount"] -= len(cached.get("cropMapping", []))
+                state["selectedPhotos"] -= sum(frame["decision"] == "keep" and bool(frame.get("selectedCrop")) for frame in cached_frames.values())
+                state["reviewPhotos"] -= sum(frame["decision"] == "review" and frame.get("processingStatus") == "ok" for frame in cached_frames.values())
+                state["rejectedPhotos"] -= sum(frame["decision"] == "reject" and frame.get("processingStatus") == "ok" for frame in cached_frames.values())
+                state["failedPhotos"] -= sum(frame.get("processingStatus") == "failed" for frame in cached_frames.values())
+                state["unsupportedPhotos"] -= sum(frame.get("processingStatus") == "unsupported" for frame in cached_frames.values())
+                state["selectedCrops"] -= len(cached.get("selectedCrops", []))
+            if worker is None:
+                worker = PolicyWorker(node)
             frames, crop_records, issues = [], [], []
             for index, photo_id in enumerate(group["photoIds"]):
                 photo = photos[photo_id]
+                if photo_id in cached_frames:
+                    frames.append(cached_frames[photo_id])
+                    crop_records.extend(row for row in cached["cropMapping"] if row["photoId"] == photo_id)
+                    continue
                 def progress(message):
                     state["phase"] = f"组{group['index']}/{len(groups)} · 照片{index + 1}/{group['count']} · {message}"
                     state["updatedAt"] = datetime.now().isoformat()
                     atomic_json(job / "status.json", state)
+                    if on_progress:
+                        on_progress("detect", state["phase"], group, state)
                 progress("读取原图，仅读不写")
                 path = (source / photo["primary"]["relative"]).resolve()
                 if not photo["supported"]:
@@ -368,6 +397,12 @@ def run(job, node, threads=4):
                     frame["processingStatus"] = "unsupported"
                 else:
                     try:
+                        if detector is None:
+                            if on_progress:
+                                on_progress("models", "载入YOLO分割与姿态CPU模型", group, state)
+                            detector = NativeDetector(threads)
+                            if on_progress:
+                                on_progress("models_ready", "YOLO分割与姿态模型已就绪", group, state)
                         if not path.is_relative_to(source):
                             raise RuntimeError("源图片路径越出已授权目录")
                         stat = path.stat()
@@ -396,7 +431,21 @@ def run(job, node, threads=4):
                         print(f"{group['id']} {photo_id}: {error}", file=sys.stderr, flush=True)
                 frame["source"] = photo
                 frames.append(frame)
-            ranked = worker.rank(frames)
+            if on_detected:
+                detected = {"group": {**group, "status": "detected"}, "frames": frames, "errors": issues,
+                            "selectedCrops": [], "cropMapping": crop_records, "versions": manifest["versions"],
+                            "phase": "detected", "completedAt": datetime.now().isoformat()}
+                atomic_json(job / "groups" / f"{group['id']}.json", detected)
+                atomic_json(job / "mapping.json", {**mapping, "crops": mapping["crops"] + crop_records})
+                on_detected(group, detected, state)
+            for frame in frames:
+                frame.pop("selectedCrop", None)
+            for record in crop_records:
+                record["selected"] = False
+                record.pop("selectedPath", None)
+            comparable = [frame for frame in frames if not frame.get("historicalOrigin") or frame["historicalOrigin"]["compatible"]]
+            by_id = {frame["id"]: frame for frame in worker.rank(comparable)}
+            ranked = [by_id.get(frame["id"], frame) for frame in frames]
             selected_paths = []
             for frame in ranked:
                 for record in (r for r in crop_records if r["photoId"] == frame["id"]):
@@ -453,6 +502,8 @@ def run(job, node, threads=4):
             atomic_json(job / "groups.json", groups)
             atomic_json(job / "status.json", state)
             print(f"{group['id']} done {state['processedPhotos']}/{state['totalPhotos']} selected={state['selectedPhotos']} review={state['reviewPhotos']} crops={state['cropCount']}", flush=True)
+            if on_group:
+                on_group(group, completed, state)
         else:
             state.update(status="completed", phase="全量已处理；待审/失败/未支持均明确列出", currentGroup=None)
         atomic_json(job / "status.json", state)
@@ -574,6 +625,10 @@ def serve(job, port, lan_ip=None, prefix=24, allow_all=False, allowed_hosts=None
         def serve_image(self, frame_id, edge=None, download=False):
             try:
                 info = previews.describe(frame_id, edge)
+                photo = previews.photos[frame_id]
+                primary = photo["primary"]
+                if photo.get("sourceIssue") or (info.size, info.mtime_ns) != (primary["size"], primary["mtimeNs"]):
+                    raise RuntimeError("Original differs from the registered analysis; historical crops remain available")
                 filename = info.path.name if download else None
                 content_type = "image/png" if edge is None and info.path.suffix.lower() == ".png" else "image/jpeg"
                 if not_modified(self.headers, info):
@@ -605,6 +660,11 @@ def serve(job, port, lan_ip=None, prefix=24, allow_all=False, allowed_hosts=None
             except (OSError, RuntimeError, Image.DecompressionBombError) as error:
                 print(f"Image preview failed for {frame_id}: {error}", file=sys.stderr)
                 self.send_error(500, "Image preview could not be generated")
+        def write_report(self, data):
+            try:
+                self.wfile.write(data)
+            except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError) as error:
+                print(f"Report client disconnected: {type(error).__name__}", file=sys.stderr)
         def do_GET(self):
             if not self.allowed():
                 self.send_error(403)
@@ -614,6 +674,25 @@ def serve(job, port, lan_ip=None, prefix=24, allow_all=False, allowed_hosts=None
                 self.send_error(400)
                 return
             query = parse_qs(urlparse(self.path).query, keep_blank_values=True)
+            if route == "/gallery-refresh-bridge":
+                # The file-origin desktop parent cannot impersonate an HTTP origin.
+                # This unprivileged sibling emits only a same-origin refresh notice.
+                data = b"""<!doctype html><meta charset="utf-8"><script>
+                addEventListener('message', event => {
+                  if (parent === window || event.source !== parent || event.origin !== 'null' ||
+                      !event.data || event.data.type !== 'birdshot:refresh-index' ||
+                      Object.keys(event.data).length !== 1 || parent.frames[1] !== window) return;
+                  parent.frames[0].postMessage({type:'birdshot:refresh-index'}, location.origin);
+                });
+                </script>"""
+                self.send_response(200)
+                self.send_header("Content-Type", "text/html; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                self.write_report(data)
+                return
             if route == "/health.json":
                 data = json.dumps({"instanceId": instance_id, "status": "ready"}).encode("utf-8")
                 self.send_response(200)
@@ -621,7 +700,7 @@ def serve(job, port, lan_ip=None, prefix=24, allow_all=False, allowed_hosts=None
                 self.send_header("Content-Length", str(len(data)))
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
-                self.wfile.write(data)
+                self.write_report(data)
                 return
             refresh_manifest()
             if route == "/species-reference":
@@ -717,7 +796,7 @@ def serve(job, port, lan_ip=None, prefix=24, allow_all=False, allowed_hosts=None
                     self.send_header("Vary", "Accept-Encoding")
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
-                self.wfile.write(data)
+                self.write_report(data)
                 return
             elif re.fullmatch(r"/gallery/group/g(?:\d{5}|[0-9a-f]{24})\.json", route):
                 group_name = route.rsplit("/", 1)[-1]

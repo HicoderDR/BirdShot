@@ -17,7 +17,11 @@ export interface Source {
   job?: string
   progress?: {
     phase?: string
-    stage?: 'scan' | 'detection' | 'metadata' | 'birder' | 'gallery'
+    stage?: 'scan' | 'models' | 'detect' | 'detection' | 'metadata' | 'classify' | 'birder' | 'select' | 'publish' | 'gallery'
+    currentGroup?: string | null
+    publishedRevision?: number
+    stages?: Array<{ id: string; label: string; status: 'pending' | 'running' | 'partial' | 'completed' | 'error';
+      processed: number; total: number; unit: string; error?: string }>
     totalPhotos?: number
     processedPhotos?: number
     totalGroups?: number
@@ -52,6 +56,8 @@ export interface State {
 
 export interface DesktopAPI {
   getState(): Promise<State>
+  checkForUpdates(): Promise<{currentVersion: string; status: 'none' | 'upToDate' | 'available' | 'incompatible' | 'error';
+    message: string; newVersion?: string; releaseUrl?: string; unsigned?: boolean}>
   chooseSource(): Promise<State>
   attachExisting(): Promise<State>
   chooseOutput(): Promise<State>

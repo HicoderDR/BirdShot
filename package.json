@@ -2,6 +2,7 @@
   "name": "birdshot",
   "private": true,
   "version": "0.0.0",
+  "desktopVersion": "0.3.0",
   "type": "module",
   "scripts": {
     "dev": "vite",
@@ -12,6 +13,7 @@
     "preview": "vite preview",
     "desktop:dev": "electron desktop/main.mjs",
     "desktop:build": "node scripts/build-desktop.mjs",
+    "desktop:installer": "node scripts/build-installer.mjs",
     "test:desktop": "node --test tests/desktop-security.test.mjs"
   },
   "dependencies": {

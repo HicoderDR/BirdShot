@@ -23,6 +23,7 @@ import json
 import os
 from pathlib import Path, PureWindowsPath
 import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -46,7 +47,7 @@ def read_json(path):
 def atomic_json(path, value):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + "." + uuid.uuid4().hex + ".part")
+    temporary = path.with_name(path.name + "." + uuid.uuid4().hex[:12] + ".part")
     try:
         temporary.write_text(json.dumps(value, ensure_ascii=False, allow_nan=False), encoding="utf-8")
         for attempt in range(10):
@@ -97,10 +98,236 @@ def known_photos(sources):
             if not path.is_file():
                 continue
             manifest = read_json(path)
+            mapping_path = Path(record["path"]) / "mapping.json"
+            fingerprints = {row["photoId"]: row.get("sourceSha256") for row in read_json(mapping_path).get("crops", [])} if mapping_path.exists() else {}
             for photo in manifest["photos"]:
                 root = photo.get("sourceRoot") or manifest["source"]
-                known[canonical(Path(root) / photo["primary"]["relative"])] = photo["primary"]
+                known[canonical(Path(root) / photo["primary"]["relative"])] = {
+                    **photo["primary"], "sourceSha256": fingerprints.get(photo["id"])}
     return known
+
+
+def history_tail_plans(source, additions):
+    plans, claimed = {}, set()
+    for record in reversed(source.get("jobs", [])):
+        if record.get("managed"):
+            continue
+        job, manifest = read_job(record["path"])
+        if canonical(manifest["source"]) != canonical(source["path"]):
+            continue
+        photos = {photo["id"]: photo for photo in manifest["photos"]}
+        for group in reversed(manifest["groups"]):
+            members = [photos[photo] for photo in group["photoIds"]]
+            stamps = [photo.get("timestamp") for photo in members]
+            if not stamps or any(stamp is None for stamp in stamps):
+                continue
+            tails = [photo["primary"]["relative"] for photo in additions
+                     if photo["primary"]["relative"] not in claimed and photo.get("timestamp") is not None
+                     and 0 <= photo["timestamp"] - max(stamps) <= 2000
+                     and photo["timestamp"] - min(stamps) <= 10000]
+            if tails:
+                key = stable_id("history-tail-", [canonical(job), group["id"]])
+                plans[key] = {"id": key, "job": str(job), "originalGroupId": group["id"],
+                              "newPhotos": tails, "status": "pending"}
+                claimed.update(tails)
+    return list(plans.values())
+
+
+def seed_history_tails(job, plans, session):
+    """Copy only affected cached groups; historical jobs are never written."""
+    from batch_culling import digest
+    manifest = read_json(job / "manifest.json")
+    seeded = {tail["id"] for tail in manifest.get("historyTails", [])}
+    groups = read_json(job / "groups.json")
+    mapping = read_json(job / "mapping.json")
+    capture_path = job / "revisions" / "capture-exif-v1.json"
+    captures = read_json(capture_path) if capture_path.exists() else {"photos": {}, "statistics": {}}
+    tails = list(manifest.get("historyTails", []))
+    cached_crops = {row["crop"] for row in session.result["rows"]}
+    for plan in plans:
+        if plan["id"] in seeded:
+            continue
+        original, old_manifest = read_job(plan["job"])
+        if canonical(old_manifest["source"]) != canonical(manifest["source"]):
+            raise RuntimeError("history-tail 原片根目录不一致，拒绝混入缓存")
+        saved = read_json(original / "groups" / (plan["originalGroupId"] + ".json"))
+        old_photos = {photo["id"]: photo for photo in old_manifest["photos"]}
+        verified_path = original / REVISION / "verification.json"
+        verified = read_json(verified_path) if verified_path.exists() else {"rows": []}
+        evidence = {row["crop"]: row for row in verified["rows"]}
+        detector_ok = saved.get("versions") == manifest["versions"] == old_manifest.get("versions")
+        classifier_ok = verified.get("fingerprint") == session.fingerprint and all(
+            evidence.get(row["crop"], {}).get("status") == "completed"
+            and evidence[row["crop"]].get("cropSha256") == row["cropSha256"]
+            and evidence[row["crop"]].get("scoreType") == "birder-fullclass"
+            and evidence[row["crop"]].get("classCount") == 10000 for row in saved["cropMapping"])
+        def unchanged(frame):
+            try:
+                return bool(frame.get("sourceSha256")) and frame.get("processingStatus") == "ok" and digest(
+                    Path(manifest["source"]) / old_photos[frame["id"]]["primary"]["relative"]) == frame["sourceSha256"]
+            except OSError:
+                return False
+        source_ok = all(unchanged(frame) for frame in saved["frames"])
+        compatible = detector_ok and classifier_ok and source_ok and not saved.get("errors")
+        reasons = ([] if detector_ok else ["历史检测/技术指纹不兼容"]) + (
+            [] if classifier_ok else ["历史Birder/中文名策略指纹不兼容"]) + (
+            [] if source_ok else ["历史原片指纹或处理状态不可确认"])
+        index = max((group["index"] for group in groups), default=0) + 1
+        new_group = {**deepcopy(saved["group"]), "id": f"g{index:05d}", "index": index, "photoIds": [],
+                     "status": "done", "thumbnail": None}
+        tail = {**plan, "groupId": new_group["id"], "cachedPhotos": len(saved["frames"]),
+                "status": "compatible" if compatible else "pending",
+                "reason": "兼容缓存，复用历史像素与分类；仅检测新增照片" if compatible else "history-tail 待确认：" + "；".join(reasons),
+                "compatibility": {"detector": detector_ok, "classifier": classifier_ok, "source": source_ok}}
+        new_group["historyTail"] = tail
+        frames, records = [], []
+        old_capture = capture_metadata(original).get("photos", {})
+        def old_media(relative):
+            path = (original / relative).resolve(strict=True)
+            if not path.is_relative_to(original):
+                raise RuntimeError("history-tail 缓存媒体路径越界")
+            return path
+        for old_frame in saved["frames"]:
+            photo = deepcopy(old_photos[old_frame["id"]])
+            photo_id = f"p{max((int(row['id'][1:]) for row in manifest['photos']), default=0) + 1:06d}"
+            origin = {"job": str(original), "groupId": plan["originalGroupId"], "photoId": old_frame["id"],
+                      "compatible": compatible, "versions": saved.get("versions")}
+            photo.update(id=photo_id, historicalOrigin=origin)
+            manifest["photos"].append(photo)
+            new_group["photoIds"].append(photo_id)
+            frame = deepcopy(old_frame)
+            frame.update(id=photo_id, group=new_group["id"], source=photo, historicalOrigin=origin)
+            frame.pop("selectedCrop", None)
+            if not compatible:
+                frame.update(decision="review", rank=None, relative=None, cohortSize=0)
+            for bird in frame["instances"]:
+                record = deepcopy(next(row for row in saved["cropMapping"] if row["photoId"] == old_frame["id"]
+                                       and row["instanceId"] == bird["id"]))
+                old_crop = record["crop"]
+                if digest(old_media(old_crop)) != record["cropSha256"]:
+                    raise RuntimeError("history-tail 缓存裁剪SHA不一致，不能安全复用")
+                relative = f"crops/{new_group['id']}/{photo_id}_b{bird['id']:02d}.jpg"
+                target = job / relative
+                target.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(old_media(old_crop), target)
+                if digest(target) != record["cropSha256"]:
+                    raise RuntimeError("history-tail 缓存裁剪复制SHA校验失败")
+                thumb = relative[:-4] + "_thumb.jpg"
+                old_thumb = original / bird.get("thumbnail", old_crop[:-4] + "_thumb.jpg")
+                if old_thumb.exists():
+                    shutil.copyfile(old_media(old_thumb.relative_to(original).as_posix()), job / thumb)
+                else:
+                    from PIL import Image
+                    with Image.open(target) as image:
+                        image.thumbnail((420, 420))
+                        image.convert("RGB").save(job / thumb, quality=85)
+                provenance = {**origin, "crop": old_crop, "selected": bool(record.get("selected"))}
+                record.update(crop=relative, groupId=new_group["id"], photoId=photo_id, selected=False,
+                              historicalOrigin=provenance)
+                record.pop("selectedPath", None)
+                bird.update(crop=relative, thumbnail=thumb, historicalOrigin=provenance)
+                records.append(record)
+                if compatible and relative not in cached_crops:
+                    session.result["rows"].append({**deepcopy(evidence[old_crop]), "crop": relative,
+                                                   "groupId": new_group["id"], "photoId": photo_id})
+                    cached_crops.add(relative)
+            if old_frame["id"] in old_capture:
+                captures["photos"][photo_id] = deepcopy(old_capture[old_frame["id"]])
+            frames.append(frame)
+        new_group["count"] = len(frames)
+        atomic_json(job / "groups" / (new_group["id"] + ".json"), {
+            "group": new_group, "frames": frames, "cropMapping": records, "selectedCrops": [], "errors": [],
+            "versions": manifest["versions"], "historicalVersions": saved.get("versions")})
+        groups.append(new_group)
+        mapping["crops"].extend(records)
+        tails.append(tail)
+    manifest.update(groups=groups, historyTails=tails, physicalPhotos=len(manifest["photos"]))
+    captures["statistics"] = {"photos": len(captures["photos"])}
+    atomic_json(capture_path, captures)
+    session.save()
+    atomic_json(job / "mapping.json", mapping)
+    atomic_json(job / "groups.json", groups)
+    atomic_json(job / "manifest.json", manifest)
+    return tails
+
+
+def finish_extension(job, transaction):
+    if transaction.get("formatVersion") != 1:
+        raise RuntimeError("不支持的增量清点checkpoint格式；未覆盖已有结果")
+    atomic_json(job / "manifest.json", transaction["manifest"])
+    atomic_json(job / "groups.json", transaction["groups"])
+    if transaction.get("checkpoint"):
+        atomic_json(job / REVISION / "pipeline.json", transaction["checkpoint"])
+    atomic_json(job / "status.json", transaction["status"])
+    (job / REVISION / "pending-extension.json").unlink(missing_ok=True)
+
+
+def extend_job(job, incoming):
+    """Append stable photos to a managed job; reuse pixels for affected tail bursts."""
+    manifest = read_json(job / "manifest.json")
+    by_relative = {photo["primary"]["relative"]: photo for photo in manifest["photos"]}
+    added = [deepcopy(photo) for photo in incoming if photo["primary"]["relative"] not in by_relative]
+    if not added:
+        return []
+    checkpoint_path = job / REVISION / "pipeline.json"
+    checkpoint = read_json(checkpoint_path) if checkpoint_path.exists() else None
+    revision = (checkpoint or {}).get("publishedRevision", 0)
+    history = job / REVISION / "history" / str(revision)
+    for path in [job / "manifest.json", job / "groups.json", job / REVISION / "gallery.json"]:
+        if path.exists():
+            atomic_json(history / path.name, read_json(path))
+    groups = read_json(job / "groups.json")
+    affected = set()
+    for photo in sorted(added, key=lambda row: (row["timestamp"] is None, row["timestamp"] or 0, row["primary"]["relative"])):
+        photo["id"] = f"p{max((int(row['id'][1:]) for row in manifest['photos']), default=0) + 1:06d}"
+        target = None
+        if photo["timestamp"] is not None:
+            for group in reversed(groups):
+                members = [row for row in manifest["photos"] if row["id"] in group["photoIds"]]
+                stamps = [row["timestamp"] for row in members if row["timestamp"] is not None]
+                if len(stamps) == len(members) and stamps and 0 <= photo["timestamp"] - max(stamps) <= 2000 \
+                        and photo["timestamp"] - min(stamps) <= 10000:
+                    unchanged = True
+                    for member in members:
+                        try:
+                            stat = (Path(manifest["source"]) / member["primary"]["relative"]).stat()
+                            unchanged = unchanged and (stat.st_size, stat.st_mtime_ns) == (
+                                member["primary"]["size"], member["primary"]["mtimeNs"])
+                        except OSError:
+                            unchanged = False
+                    if not unchanged:
+                        continue
+                    target = group
+                    break
+        if target is None:
+            index = max((group["index"] for group in groups), default=0) + 1
+            target = {"id": f"g{index:05d}", "index": index, "photoIds": [], "count": 0,
+                      "capturedAt": photo["capturedAt"], "grouping": incoming[0].get("grouping") or
+                      ("EXIF原始拍摄时间+子秒，相邻≤2秒，总长≤10秒" if photo["timestamp"] is not None else "无可信拍摄时间，独立单张"),
+                      "thumbnail": None, "status": "pending"}
+            groups.append(target)
+        path = job / "groups" / (target["id"] + ".json")
+        if path.exists() and target["id"] not in affected:
+            saved = read_json(path)
+            atomic_json(history / "groups" / path.name, saved)
+            verified_path = job / REVISION / "groups" / path.name
+            if verified_path.exists():
+                atomic_json(history / "verified-groups" / path.name, read_json(verified_path))
+            saved["phase"] = "extending"
+            atomic_json(path, saved)
+        target["photoIds"].append(photo["id"])
+        target.update(count=len(target["photoIds"]), status="pending")
+        manifest["photos"].append(photo)
+        affected.add(target["id"])
+    manifest.update(groups=groups, physicalPhotos=sum(1 + len(photo["companions"]) for photo in manifest["photos"]))
+    if checkpoint:
+        checkpoint["completedGroups"] = [group for group in checkpoint["completedGroups"] if group not in affected]
+    status = read_json(job / "status.json")
+    status.update(status="pending", totalPhotos=len(manifest["photos"]), totalGroups=len(groups))
+    transaction = {"formatVersion": 1, "manifest": manifest, "groups": groups, "checkpoint": checkpoint, "status": status}
+    atomic_json(job / REVISION / "pending-extension.json", transaction)
+    finish_extension(job, transaction)
+    return sorted(affected)
 
 
 def aggregate_library(root, sources):
@@ -113,8 +340,9 @@ def aggregate_library(root, sources):
     gallery = {"version": 1, "analysisVersion": "desktop-library-v1", "revision": "desktop-library-v1",
                "status": "completed", "updatedAt": datetime.now().isoformat(),
                "items": items, "frames": [], "shootGroups": shoot_groups, "sourceErrors": errors}
+    gallery["sourceIssues"] = [{"sourceId": source["id"], **issue} for source in sources for issue in source.get("sourceIssues", [])]
     for source in sources:
-        for job_record in source.get("jobs", []):
+        for job_record in sorted(source.get("jobs", []), key=lambda row: not row.get("overlay", False)):
             job = Path(job_record["path"])
             if not (job / "manifest.json").is_file():
                 if source.get("status") not in {"queued", "processing"}:
@@ -158,6 +386,10 @@ def aggregate_library(root, sources):
                         (item["capture"] for item in old_gallery.get("items", [])
                          if item.get("frameId") == photo["id"] and item.get("capture")), {})
                     updated = deepcopy(photo)
+                    if photo["primary"]["relative"] in source.get("associations", {}):
+                        updated["companions"] = deepcopy(source["associations"][photo["primary"]["relative"]])
+                    if any(issue["path"] == photo["primary"]["relative"] for issue in source.get("sourceIssues", [])):
+                        updated["sourceIssue"] = True
                     updated.update(id=new_id, originalPhotoId=photo["id"], sourceId=source["id"],
                                    sourceRoot=original_root, sourceName=source["name"], capture=capture)
                     photos.append(updated)
@@ -187,6 +419,8 @@ def aggregate_library(root, sources):
                     if original["photoId"] not in frame_ids:
                         continue
                     record = deepcopy(original)
+                    if original.get("sourceRelative") in source.get("associations", {}):
+                        record["rawCompanions"] = [row["relative"] for row in source["associations"][original["sourceRelative"]]]
                     record.update(photoId=frame_ids[original["photoId"]], groupId=group_id(original["groupId"]),
                                   originalPhotoId=original["photoId"], originalGroupId=original["groupId"], sourceId=source["id"])
                     record["crop"] = register_media(original["crop"])
@@ -206,7 +440,8 @@ def aggregate_library(root, sources):
                                       "decision": "review", "rank": None, "preferredRank": None,
                                       "processingStatus": "pending",
                                       "selectedBefore": bool(record.get("selected")), "species": {"top5": [], "top3": []},
-                                      "birdVerification": {"status": "unknown", "reason": "此旧批次尚无验鸟结果；只读加载，不重跑"}})
+                                      "birdVerification": {"status": "unknown", "evidence": {"status": "pending"},
+                                                           "reason": "验鸟证据尚未完成；裁剪可审核，不作为优选"}})
                 group_dir = job / REVISION / "groups"
                 if not group_dir.is_dir():
                     group_dir = job / "groups"
@@ -294,19 +529,45 @@ def aggregate_library(root, sources):
     return gallery
 
 
-def run_worker(spec):
+def run_worker(spec, observer=None):
     """Subprocess-only entry: every write is confined to this managed job."""
     resources, job = Path(spec["resources"]), Path(spec["job"])
     sys.path.insert(0, str(resources / "scripts"))
     os.environ["BIRDSHOT_MODEL_CACHE"] = str(resources / "models")
     from batch_culling import initialize, run
     from capture_metadata import extract
-    from gallery_build import build
+    from gallery_build import build, DECISION_VERSION, POLICY_VERSION, THRESHOLDS
     result_path = job.parent / (job.name + ".worker.json")
-    def stage(name):
-        atomic_json(result_path, {"status": "processing", "stage": name, "job": str(job)})
+    progress = {"stage": "scan", "phase": "清点照片目录，形成稳定连拍组", "currentGroup": None,
+                "totalPhotos": 0, "processedPhotos": 0, "totalGroups": 0, "completedGroups": 0,
+                "cropCount": 0, "publishedRevision": 0, "stages": [
+                    {"id": name, "label": label, "status": "pending", "processed": 0, "total": 0, "unit": unit}
+                    for name, label, unit in (
+                        ("scan", "清点与稳定分组", "photos"), ("models", "加载本地模型", "groups"),
+                        ("detect", "检测 · 分割 · 姿态 · 原像素裁剪", "photos"),
+                        ("metadata", "读取拍摄元数据", "photos"), ("classify", "Birder全10000类验鸟", "crops"),
+                        ("select", "同组技术比较与严格优选", "groups"), ("publish", "发布可审核图库", "groups"))]}
+    def stage(name, phase, processed=None, total=None, done=False, event=None):
+        progress.update(stage=name, phase=phase)
+        row = next(row for row in progress["stages"] if row["id"] == name)
+        if processed is not None:
+            row["processed"] = processed
+        if total is not None:
+            row["total"] = total
+        row["status"] = "completed" if done else "partial" if row["processed"] else "running"
+        atomic_json(result_path, {"status": "processing", "stage": name, "job": str(job), "progress": progress})
+        if observer and event:
+            observer(event, deepcopy(progress))
     try:
-        stage("scan")
+        saved_checkpoint_path = job / REVISION / "pipeline.json"
+        if saved_checkpoint_path.exists() and read_json(saved_checkpoint_path).get("formatVersion") != 1:
+            raise RuntimeError("不支持的流水checkpoint格式；未覆盖已有结果")
+        extension_path = job / REVISION / "pending-extension.json"
+        if extension_path.exists():
+            finish_extension(job, read_json(extension_path))
+        stage("scan", progress["phase"])
+        new_photos = spec.get("additionalPhotos") or (
+            (spec.get("inventory") or {}).get("photos", []) if spec.get("historyTails") else [])
         if not (job / "manifest.json").exists():
             if job.exists():
                 # An interrupted initialization has no committed inference to preserve.
@@ -317,32 +578,142 @@ def run_worker(spec):
                     if folder.is_dir():
                         folder.rmdir()
                 job.rmdir()
-            initialize(Path(spec["source"]), job, spec.get("excludePaths", []))
-        stage("detection")
-        status = read_json(job / "status.json")
-        if status["status"] != "completed":
-            run(job, Path(spec["node"]))
-        stage("metadata")
-        if not (job / "revisions" / "capture-exif-v1.json").exists():
-            extract(job)
-            metadata = read_json(job / "revisions" / "capture-exif-v1.json")
-            metadata.pop("userRegionReference", None)
-            atomic_json(job / "revisions" / "capture-exif-v1.json", metadata)
+            snapshot = spec.get("inventory")
+            if spec.get("historyTails"):
+                if snapshot is None:
+                    from batch_culling import inventory
+                    snapshot = inventory(Path(spec["source"]), spec.get("excludePaths", []))
+                new_photos = snapshot["photos"]
+                snapshot = {**snapshot, "photos": [], "groups": [], "physicalPhotos": 0}
+            initialize(Path(spec["source"]), job, spec.get("excludePaths", []), snapshot=snapshot)
+        manifest = read_json(job / "manifest.json")
+        progress.update(totalPhotos=len(manifest["photos"]), totalGroups=len(manifest["groups"]))
+        stage("scan", "清点完成，按真实EXIF连拍边界逐组处理", progress["totalPhotos"], progress["totalPhotos"], done=True)
         taxonomy = resources / "assets" / "taxonomy"
-        stage("birder")
-        mapping = read_json(job / "mapping.json")["crops"]
-        if mapping:
-            from gallery_birder import run as classify
-            classify(job, job / REVISION, taxonomy, 4)
-            stage("gallery")
-            build(job, job / REVISION, Path(spec["node"]), taxonomy)
-        else:
-            atomic_json(job / REVISION / "gallery.json", {
-                "version": 1, "status": "completed", "items": [], "summary": {"preferred": 0},
-                "progress": {"processed": 0, "total": 0}})
-        atomic_json(result_path, {"status": "completed", "stage": "gallery", "job": str(job)})
+        stage("models", "准备本地模型与持久分类策略（尚未加载则无百分比）", 0, 2)
+        from gallery_birder import ClassifierSession
+        session = ClassifierSession(job, job / REVISION, taxonomy, 4)
+        if spec.get("historyTails"):
+            seed_history_tails(job, spec["historyTails"], session)
+        if new_photos:
+            extend_job(job, new_photos)
+        manifest = read_json(job / "manifest.json")
+        progress.update(totalPhotos=len(manifest["photos"]), totalGroups=len(manifest["groups"]))
+        stage("scan", "清点完成；历史尾组只复用缓存，新照片逐组处理", progress["totalPhotos"], progress["totalPhotos"], done=True)
+        fingerprint = hashlib.sha256(json.dumps({
+            "detector": manifest["versions"], "classifier": session.fingerprint, "decision": DECISION_VERSION,
+            "gatePolicy": POLICY_VERSION, "gateThresholds": THRESHOLDS,
+            "ranking": hashlib.sha256((resources / "scripts" / "gallery_rank.mjs").read_bytes()).hexdigest(),
+            "builder": hashlib.sha256((resources / "scripts" / "gallery_build.py").read_bytes()).hexdigest(),
+        }, sort_keys=True).encode()).hexdigest()
+        checkpoint_path = job / REVISION / "pipeline.json"
+        checkpoint = read_json(checkpoint_path) if checkpoint_path.exists() else {
+            "formatVersion": 1, "fingerprint": fingerprint, "completedGroups": [], "publishedRevision": 0}
+        if checkpoint["fingerprint"] != fingerprint:
+            raise RuntimeError("增量图库策略指纹改变，拒绝混用已完成组")
+        completed = set(checkpoint["completedGroups"])
+        progress.update(completedGroups=len(completed), publishedRevision=checkpoint["publishedRevision"])
+        loaded = set()
+        def counts():
+            groups = [read_json(path) for path in (job / "groups").glob("g*.json")]
+            failures = [error for group in groups for error in group.get("errors", [])]
+            progress["processedPhotos"] = sum(len(group["frames"]) for group in groups)
+            progress["cropCount"] = len(read_json(job / "mapping.json")["crops"])
+            detect = next(row for row in progress["stages"] if row["id"] == "detect")
+            detect.update(processed=progress["processedPhotos"], total=progress["totalPhotos"],
+                          status="error" if failures else "completed" if progress["processedPhotos"] == progress["totalPhotos"] else
+                          "partial" if progress["processedPhotos"] else "pending")
+            if failures:
+                detect["error"] = "检测/裁剪失败：" + json.dumps(failures, ensure_ascii=False)
+        def publish(group, final):
+            counts()
+            stage("publish", "发布本组最终图库" if final else "裁剪已提交，可立即待审；验鸟与相对名次尚未完成",
+                  len(completed), progress["totalGroups"])
+            build(job, job / REVISION, Path(spec["node"]), taxonomy, finalized_groups=completed, status="running")
+            progress["publishedRevision"] += 1
+            checkpoint.update(completedGroups=sorted(completed), publishedRevision=progress["publishedRevision"])
+            atomic_json(checkpoint_path, checkpoint)
+            progress["completedGroups"] = len(completed)
+            stage("publish", "本组最终结果已发布" if final else "本组真实裁剪已发布至待审",
+                  len(completed), progress["totalGroups"], event="final_published" if final else "pending_published")
+        def detected(group, result, state):
+            progress["currentGroup"] = group["id"]
+            publish(group, False)
+        def group_ready(group, result, state):
+            if group["id"] in completed:
+                return
+            progress["currentGroup"] = group["id"]
+            counts()
+            # Recovered detection commits also become readable before classification.
+            if result.get("phase") == "detected":
+                publish(group, False)
+            stage("metadata", "读取本组原片必要EXIF元数据", total=progress["totalPhotos"])
+            stats = extract(job, group["photoIds"], include_region=False)
+            stage("metadata", "本组拍摄元数据已提交", stats.get("photos", 0), progress["totalPhotos"])
+            rows = [row for row in read_json(job / "mapping.json")["crops"] if row["groupId"] == group["id"]]
+            rows = [row for row in rows if not row.get("historicalOrigin") or row["historicalOrigin"]["compatible"]]
+            def classification_event(event, result):
+                if event == "loading":
+                    stage("models", "载入Birder全10000类CPU模型", len(loaded), 2)
+                else:
+                    loaded.add("birder")
+                    model_stage = next(row for row in progress["stages"] if row["id"] == "models")
+                    model_stage.update(processed=len(loaded), status="completed" if len(loaded) == 2 else "partial")
+                    stage("classify", "本组Birder全类竞争证据已持久化", result["processed"], progress["cropCount"])
+            stage("classify", "本组Birder全10000类验鸟与鸟种识别", session.result["processed"], progress["cropCount"])
+            verified = session.classify(rows, total=progress["cropCount"], on_progress=classification_event)
+            failures = result.get("errors", []) + [row for row in verified if row["status"] == "error"]
+            stage("select", "复用同主体匹配与技术策略，完整本组后才形成相对名次", len(completed), progress["totalGroups"])
+            if failures:
+                publish(group, False)
+                raise RuntimeError("连拍组处理失败，已完成图库保留：" + json.dumps(failures, ensure_ascii=False))
+            completed.add(group["id"])
+            publish(group, True)
+            stage("select", "本组验鸟与严格技术优选已完成", len(completed), progress["totalGroups"])
+        def detection_event(event, message, group, state):
+            progress["currentGroup"] = group["id"]
+            if event == "models":
+                stage("models", message, len(loaded), 2)
+            elif event == "models_ready":
+                loaded.add("detector")
+                stage("models", message, len(loaded), 2, done=len(loaded) == 2)
+            else:
+                counts()
+                stage("detect", message, progress["processedPhotos"], progress["totalPhotos"],
+                      event="before_group" if event == "before_group" else None)
+        run(job, Path(spec["node"]), on_detected=detected, on_group=group_ready,
+            on_progress=detection_event, skip_groups=completed)
+        counts()
+        session.classify([], total=progress["cropCount"], final=True)
+        build(job, job / REVISION, Path(spec["node"]), taxonomy, finalized_groups=completed, status="completed")
+        gallery = read_json(job / REVISION / "gallery.json")
+        pending_tails = [tail for tail in gallery.get("historyTails", []) if tail["status"] == "pending"]
+        progress["currentGroup"] = None
+        for row in progress["stages"]:
+            row["status"] = "completed"
+            if row["id"] == "models":
+                row.update(processed=len(loaded), total=len(loaded))
+                if not loaded:
+                    row["label"] = "复用持久缓存，本轮无需加载模型"
+            else:
+                row["processed"] = row["total"]
+            if row["id"] == "classify" and session.result["processed"] < progress["cropCount"]:
+                row.update(processed=session.result["processed"], total=progress["cropCount"], status="partial")
+            if row["id"] == "select" and pending_tails:
+                row.update(processed=len(completed) - len(pending_tails), status="partial")
+        progress["publishedRevision"] += 1
+        checkpoint.update(publishedRevision=progress["publishedRevision"])
+        atomic_json(checkpoint_path, checkpoint)
+        progress.update(stage="publish", phase="所有稳定组已完成；已处理未知与尚未处理分开统计")
+        if pending_tails:
+            progress["phase"] = "新增照片已处理；history-tail 待确认，请打开该组裁剪查看新旧鸟体对比"
+        atomic_json(result_path, {"status": "completed", "stage": "publish", "job": str(job), "progress": progress,
+                                 "historyTails": gallery.get("historyTails", [])})
     except BaseException as error:
-        atomic_json(result_path, {"status": "error", "error": str(error), "job": str(job)})
+        row = next(row for row in progress["stages"] if row["id"] == progress["stage"])
+        row.update(status="error", error=str(error))
+        atomic_json(result_path, {"status": "error", "stage": progress["stage"], "error": str(error),
+                                 "job": str(job), "progress": progress})
         raise
 
 
@@ -445,6 +816,7 @@ class LibraryController:
         self.owner = ProcessOwner(include_current=own_process)
         self.worker = self.server = None
         self.worker_source = None
+        self.pending_inventories = {}
         self.verified_assets = {}
         self.config_path = self.data / "desktop-library.json"
         self.instance_lock = (self.data / "controller.lock").open("a+b")
@@ -465,13 +837,22 @@ class LibraryController:
             self.owner.close()
             raise RuntimeError("此 userData 已有桌面控制器运行，未启动第二个实例")
         saved = read_json(self.config_path) if self.config_path.exists() else {}
+        if saved and saved.get("version", 1) != 1:
+            self.instance_lock.close()
+            self.owner.close()
+            raise RuntimeError("不支持的照片库配置版本；未覆盖配置或已有结果")
+        self.config_extra = {key: deepcopy(value) for key, value in saved.items()
+                             if key not in {"version", "outputRoot", "service", "sources", "detachedSources"}}
         self.sources = saved.get("sources", [])
         self.detached_sources = saved.get("detachedSources", [])
         self.output_root = Path(saved.get("outputRoot", self.data / "output")).resolve()
         self.service_config = saved.get("service", {"mode": "local", "port": 5274})
         self.service = {"status": "stopped", **self.service_config, "localUrl": None, "lanUrls": []}
+        self.view_revision = 0
         for source in self.sources:
             if source.get("status") == "processing":
+                source["status"] = "queued"
+            if source.get("scanRequested") and source.get("status") != "queued":
                 source["status"] = "queued"
             error = source_error(source["path"])
             if error:
@@ -579,13 +960,14 @@ class LibraryController:
 
     def state(self):
         with self.lock:
-            return {"version": 1, "instanceId": self.instance_id, "runtime": deepcopy(self.runtime),
+            return {"version": 1, "instanceId": self.instance_id, "viewRevision": self.view_revision,
+                    "runtime": deepcopy(self.runtime),
                     "sources": [{key: deepcopy(value) for key, value in source.items() if key != "jobs"}
                                 for source in self.sources],
                     "outputRoot": str(self.output_root), "service": deepcopy(self.service)}
 
     def persist(self):
-        atomic_json(self.config_path, {"version": 1, "outputRoot": str(self.output_root),
+        atomic_json(self.config_path, {**self.config_extra, "version": 1, "outputRoot": str(self.output_root),
                                       "service": self.service_config, "sources": self.sources,
                                       "detachedSources": self.detached_sources})
 
@@ -617,6 +999,7 @@ class LibraryController:
 
     def rebuild(self):
         gallery = aggregate_library(self.library, self.sources)
+        self.view_revision += 1
         changed = False
         for error in gallery["sourceErrors"]:
             source = next((source for source in self.sources if source["id"] == error["sourceId"]), None)
@@ -630,6 +1013,7 @@ class LibraryController:
         path = self.validate_source(path)
         for source in self.sources:
             if canonical(source["path"]) == canonical(path):
+                self.rescan(source["id"])
                 return source
         detached = next((source for source in self.detached_sources if canonical(source["path"]) == canonical(path)), None)
         if detached:
@@ -697,11 +1081,81 @@ class LibraryController:
     def rescan(self, source_id):
         source = self.find_source(source_id)
         self.validate_source(source["path"])
+        source["scanRequested"] = True
+        source.pop("scanSnapshot", None)
+        source.pop("scanAttempts", None)
+        source.pop("pendingFiles", None)
         if source["status"] != "processing":
             source["status"] = "queued"
             source.pop("error", None)
-            self.changed()
+        self.changed()
         return source
+
+    def check_additions(self, source):
+        from batch_culling import inventory
+        snapshot = inventory(Path(source["path"]))
+        known = known_photos([source])
+        current = {canonical(Path(source["path"]) / photo["primary"]["relative"]): photo for photo in snapshot["photos"]}
+        issues = []
+        for identity, original in known.items():
+            photo = current.get(identity)
+            if photo is None:
+                # A newly paired RAW is no longer a primary, but is still present.
+                path = Path(identity)
+                if not path.exists():
+                    issues.append({"path": original["relative"], "kind": "missing", "message": "原片已删除或失联；历史裁剪仍保留"})
+            elif (photo["primary"]["size"], photo["primary"]["mtimeNs"]) != (original["size"], original["mtimeNs"]) or \
+                    original.get("sourceSha256") and hashlib.sha256(Path(identity).read_bytes()).hexdigest() != original["sourceSha256"]:
+                issues.append({"path": original["relative"], "kind": "changed", "message": "同路径原片已改变，待确认；不重算或错配旧原图"})
+        issues.extend({"kind": "history-tail", "path": ", ".join(tail["newPhotos"]), "message": tail["reason"],
+                       "groupId": tail["groupId"]} for tail in source.get("historyTails", [])
+                      if tail.get("status") == "pending" and tail.get("groupId") and tail.get("reason"))
+        source["sourceIssues"] = issues
+        candidates = [photo for identity, photo in current.items() if identity not in known]
+        measured = {photo["primary"]["relative"]: [photo["primary"]["size"], photo["primary"]["mtimeNs"]] for photo in candidates}
+        previous = source.get("scanSnapshot")
+        source["scanSnapshot"] = measured
+        source["scanAttempts"] = source.get("scanAttempts", 0) + 1
+        stable = [photo for photo in candidates if previous and previous.get(photo["primary"]["relative"]) == measured[photo["primary"]["relative"]]
+                  and time.time_ns() - photo["primary"]["mtimeNs"] >= 1_000_000_000]
+        waiting = [photo["primary"]["relative"] for photo in candidates if photo not in stable]
+        source["pendingFiles"] = waiting
+        if waiting and source["scanAttempts"] < 6:
+            source["progress"] = {"stage": "scan", "phase": "等待复制中的新增文件稳定（size/mtime复查）"}
+            self.changed()
+            return None
+        source["scanRequested"] = False
+        source.pop("scanSnapshot", None)
+        source.pop("scanAttempts", None)
+        # RAW companions only change provenance, never launch a pixel model.
+        associations = {}
+        for photo in snapshot["photos"]:
+            identity = canonical(Path(source["path"]) / photo["primary"]["relative"])
+            if identity in known and photo["companions"] and not any(
+                    issue["path"] == photo["primary"]["relative"] for issue in issues):
+                associations[photo["primary"]["relative"]] = photo["companions"]
+        source["associations"] = associations
+        for record in source["jobs"]:
+            if not record.get("managed") or not record.get("completed") or not associations:
+                continue
+            job = Path(record["path"])
+            manifest = read_json(job / "manifest.json")
+            for photo in manifest["photos"]:
+                if photo["primary"]["relative"] in associations:
+                    photo["companions"] = associations[photo["primary"]["relative"]]
+            atomic_json(job / "manifest.json", manifest)
+        wanted = {photo["id"] for photo in stable}
+        grouped = []
+        for group in snapshot["groups"]:
+            ids = [photo for photo in group["photoIds"] if photo in wanted]
+            if ids:
+                index = len(grouped) + 1
+                grouped.append({**group, "id": f"g{index:05d}", "index": index, "photoIds": ids, "count": len(ids)})
+        self.pending_inventories[source["id"]] = {
+            **snapshot, "photos": stable, "groups": grouped,
+            "physicalPhotos": sum(1 + len(photo["companions"]) for photo in stable)}
+        source["historyTails"] = history_tail_plans(source, stable)
+        return stable
 
     def environment(self):
         env = os.environ.copy()
@@ -728,22 +1182,45 @@ class LibraryController:
             self.changed()
             return
         resumable = next((record for record in reversed(source["jobs"]) if record.get("managed") and not record.get("completed")), None)
+        additions = None
+        if resumable is None:
+            additions = self.check_additions(source)
+            if additions is None:
+                return
+            if not additions:
+                self.pending_inventories.pop(source["id"], None)
+                source.update(status="error" if source["sourceIssues"] else "completed",
+                              progress={"stage": "scan", "phase": "检查完成：没有稳定新增照片" +
+                                        ("；复制中的文件仍待下次检查" if source["pendingFiles"] else "")})
+                if source["sourceIssues"]:
+                    source["error"] = "原片变化/失联需确认；历史裁剪保留"
+                self.rebuild()
+                self.changed()
+                return
+            resumable = next((record for record in reversed(source["jobs"]) if record.get("managed") and record.get("completed")), None)
+            if resumable:
+                resumable["completed"] = False
         if resumable is None:
             job = self.output_root / "jobs" / ("job-" + uuid.uuid4().hex[:12])
             resumable = {"path": str(job), "managed": True, "completed": False}
             source["jobs"].append(resumable)
+        if source.get("historyTails"):
+            resumable["overlay"] = True
         job = Path(resumable["path"])
         excluded = known_photos(self.sources)
-        if not (job / "manifest.json").is_file():
-            for identity, original in excluded.items():
-                original_path = Path(identity)
-                if original_path.is_relative_to(Path(source["path"]).resolve()) and original_path.exists():
-                    stat = original_path.stat()
-                    if (stat.st_size, stat.st_mtime_ns) != (original.get("size"), original.get("mtimeNs")):
-                        raise ValueError("已登记原片发生变化，未覆盖或重算旧结果：" + str(original_path))
         spec_path = self.data / ("worker-" + source["id"] + ".json")
+        previous_spec = read_json(spec_path) if spec_path.exists() else {}
+        if previous_spec.get("job") != str(job):
+            previous_spec = {}
+        inventory_snapshot = self.pending_inventories.pop(source["id"], None) or previous_spec.get("inventory")
+        if additions is None:
+            additions = previous_spec.get("additionalPhotos")
         atomic_json(spec_path, {"resources": str(self.resources), "node": str(self.node), "source": source["path"],
-                                "job": str(job), "excludePaths": list(excluded)})
+                                "job": str(job), "excludePaths": list(excluded) +
+                                [str(Path(source["path"]) / name) for name in source.get("pendingFiles", [])],
+                                "inventory": inventory_snapshot,
+                                "historyTails": source.get("historyTails") or previous_spec.get("historyTails"),
+                                "additionalPhotos": additions if (job / "manifest.json").exists() else None})
         source.update(status="processing", job=str(job), progress={"stage": "scan", "phase": "清点照片目录"})
         source.pop("error", None)
         self.changed()
@@ -758,7 +1235,8 @@ class LibraryController:
         job = Path(source["job"])
         status_path = job.parent / (job.name + ".worker.json")
         worker_status = read_json(status_path) if status_path.is_file() else {}
-        progress = read_json(job / "status.json") if (job / "status.json").is_file() else {}
+        progress = worker_status.get("progress") or (
+            read_json(job / "status.json") if (job / "status.json").is_file() else {})
         progress["stage"] = worker_status.get("stage", "scan")
         verification = job / REVISION / "verification.json"
         if progress["stage"] == "birder" and verification.is_file():
@@ -766,13 +1244,24 @@ class LibraryController:
             progress.update(processed=result.get("processed", 0), total=result.get("total", 0),
                             phase="Birder 全球类别验鸟与鸟种识别")
         if progress != source.get("progress"):
+            published = progress.get("publishedRevision", 0) != (source.get("progress") or {}).get("publishedRevision", 0)
             source["progress"] = progress
+            if published:
+                self.rebuild()
             self.changed()
         returncode = self.worker.poll()
         if returncode is None:
             return
         if returncode == 0 and worker_status.get("status") == "completed":
-            source["status"] = "completed"
+            if worker_status.get("historyTails"):
+                source["historyTails"] = worker_status["historyTails"]
+                source["sourceIssues"] = [issue for issue in source.get("sourceIssues", []) if issue["kind"] != "history-tail"] + [
+                    {"kind": "history-tail", "path": ", ".join(tail["newPhotos"]), "message": tail["reason"],
+                     "groupId": tail["groupId"]}
+                    for tail in source["historyTails"] if tail["status"] == "pending"]
+            source["status"] = "queued" if source.get("scanRequested") else "error" if source.get("sourceIssues") else "completed"
+            if source.get("sourceIssues"):
+                source["error"] = "来源事项待确认；历史缓存只读保留，新照片处理已完成"
             next(record for record in source["jobs"] if record["path"] == str(job))["completed"] = True
         else:
             source.update(status="error", error=worker_status.get("error") or
