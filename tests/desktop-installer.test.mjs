@@ -63,6 +63,15 @@ try {
   const flow = await run(process.execPath, [path.join(root, 'tests', 'desktop-packaged.test.mjs')], { env })
   assert.equal(flow.code, 0, flow.stderr + '\n' + flow.stdout)
   proof.applicationFlow = flow.stdout
+  if (version === '0.4.0') {
+    const reviewRoot = await mkdtemp(path.join(testRoot, '审阅与回收 fixture '))
+    const review = await run(process.execPath, [path.join(root, 'tests', 'review-packaged.test.mjs')], {
+      env: { ...env, BIRDSHOT_TEST_REVIEW_PACKAGE: '1', BIRDSHOT_TEST_REVIEW_INSTALLED: '1',
+        BIRDSHOT_REVIEW_VALIDATION_ROOT: reviewRoot },
+    })
+    assert.equal(review.code, 0, review.stderr + '\n' + review.stdout)
+    proof.installedReviewNativeFlow = review.stdout
+  }
   const libraryFile = path.join(env.BIRDSHOT_VALIDATION_ROOT, '干净 用户配置', 'desktop-library.json')
   const libraryBefore = await readFile(libraryFile)
   const originalFiles = [path.join(env.BIRDSHOT_VALIDATION_ROOT, '来源甲', '同名 照片', '连续 鸟 1.jpg'),

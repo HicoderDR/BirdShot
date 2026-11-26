@@ -92,6 +92,25 @@ class PreviewTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 cache.get("p000002", 960)
 
+    def test_480_is_private_oriented_and_budget_pruned_while_500_is_rejected(self):
+        with tempfile.TemporaryDirectory(dir=ROOT / ".tools") as folder:
+            root = Path(folder)
+            path, photos, _ = self.fixture(root, size=(1200, 800), orientation=6)
+            before = path.read_bytes()
+            cache = PreviewCache(path.parent, photos, root / "cache")
+            first = cache.get("p000001", 480)
+            with Image.open(io.BytesIO(first.data)) as image:
+                self.assertEqual(image.size, (320, 480))
+            self.assertEqual(path.read_bytes(), before)
+            self.assertTrue(cache.get("p000001", 480).hit)
+            self.assertNotEqual(first.source.key, cache.describe("p000001", 960).key)
+            self.assertNotEqual(first.source.key, cache.describe("p000001").key)
+            with self.assertRaises(ValueError):
+                cache.get("p000001", 500)
+            cache.budget = 0
+            cache._prune()
+            self.assertFalse(list(cache.root.glob("*-480.jpg")))
+
 
 if __name__ == "__main__":
     unittest.main()

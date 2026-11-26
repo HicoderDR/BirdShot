@@ -4,6 +4,12 @@ const { contextBridge, ipcRenderer } = require('electron')
 if (process.isMainFrame) {
   contextBridge.exposeInMainWorld('birdshotDesktop', Object.freeze({
     getState: () => ipcRenderer.invoke('birdshot:state'),
+    review: (action, params) => ipcRenderer.invoke('birdshot:review', action, params),
+    onReviewProgress: callback => {
+      const handler = (_event, progress) => callback(progress)
+      ipcRenderer.on('birdshot:review-progress', handler)
+      return () => ipcRenderer.removeListener('birdshot:review-progress', handler)
+    },
     checkForUpdates: () => ipcRenderer.invoke('birdshot:check-updates'),
     chooseSource: () => ipcRenderer.invoke('birdshot:choose-source'),
     attachExisting: () => ipcRenderer.invoke('birdshot:attach-existing'),

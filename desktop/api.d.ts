@@ -56,6 +56,9 @@ export interface State {
 
 export interface DesktopAPI {
   getState(): Promise<State>
+  review(action: 'state' | 'decide' | 'preferences' | 'cleanupPreview' | 'cleanupExecute' | 'cleanupCancel',
+    params?: Record<string, unknown>): Promise<unknown>
+  onReviewProgress(listener: (progress: { token: string; completed: number; total: number }) => void): () => void
   checkForUpdates(): Promise<{currentVersion: string; status: 'none' | 'upToDate' | 'available' | 'incompatible' | 'error';
     message: string; newVersion?: string; releaseUrl?: string; unsigned?: boolean}>
   chooseSource(): Promise<State>

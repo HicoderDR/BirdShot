@@ -9,6 +9,7 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { trustedSender, externalReference, networkSettings } from './security.mjs'
 import { checkUpdates } from './updates.mjs'
+import { createReviewNative } from './review-native.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const page = path.join(here, 'renderer', 'index.html')
@@ -17,6 +18,29 @@ let window, backend, lastState, closing = false, sequence = 0, readyResolve, rea
 const pending = new Map()
 const instanceId = randomUUID()
 const ready = new Promise((resolve, reject) => { readyResolve = resolve; readyReject = reject })
+const reviewNative = createReviewNative({
+  command,
+  busy: () => lastState?.sources?.some(source => ['processing', 'queued'].includes(source.status)) === true,
+  trashItem: filename => shell.trashItem(filename),
+  progress: update => { if (window && !window.isDestroyed()) window.webContents.send('birdshot:review-progress', update) },
+  confirm: async plan => {
+    const raw = plan.rawCount || 0
+    const choice = await dialog.showMessageBox(window, { type: 'warning',
+      title: '将未保留的原片移到系统回收站', buttons: ['取消', '确认移到回收站'], defaultId: 0, cancelId: 0,
+      message: `本次将回收 ${plan.photoCount || 0} 张主照片${raw ? `及 ${raw} 个配对RAW` : '，配对RAW不动'}。`,
+      detail: `仅限此次清单中的人工已遴选组；保留 ${plan.keepCount || 0} 张。原文件可在系统回收站还原，无法回收的项会报告失败，不永久删除。\n\n` +
+        plan.files.slice(0, 15).map(file => file.name).join('\n') + (plan.files.length > 15 ? '\n…其余请参照应用清单' : '') })
+    if (choice.response !== 1) return false
+    if (plan.includeZero) {
+      const zero = await dialog.showMessageBox(window, { type: 'warning', title: '零保留组额外确认',
+        buttons: ['取消', '我确认本次也回收零保留组'], defaultId: 0, cancelId: 0,
+        message: '本次包含没有保留任何照片的人工组，组内所有列定主照片会进入回收站。',
+        detail: '此确认只适用当前清单，不会被“记住退出选择”绕过。' })
+      if (zero.response !== 1) return false
+    }
+    return true
+  },
+})
 ready.catch(() => {})
 if (process.env.BIRDSHOT_USER_DATA) app.setPath('userData', path.resolve(process.env.BIRDSHOT_USER_DATA))
 app.setName('BirdShot')
@@ -111,6 +135,7 @@ async function choose(action, title) {
 }
 
 function registerIpc() {
+  handler('birdshot:review', (action, params) => reviewNative(action, params))
   handler('birdshot:check-updates', async () => {
     const version = app.isPackaged ? app.getVersion() :
       JSON.parse(await readFile(path.resolve(here, '..', 'package.json'))).desktopVersion
@@ -167,6 +192,11 @@ app.whenReady().then(async () => {
   window.on('close', event => {
     if (closing) return
     event.preventDefault()
+    if (reviewNative.isRunning()) {
+      dialog.showMessageBox(window, { type: 'info', message: '回收操作尚未结束。',
+        detail: '请在审阅界面取消剩余项目或等待完成，再退出App。已完成的项目不会被重复操作。' })
+      return
+    }
     if (lastState?.service?.mode !== 'local' && lastState?.service?.status === 'ready') {
       const choice = dialog.showMessageBoxSync(window, { type: 'question', buttons: ['退出并停止共享', '取消'],
         defaultId: 1, cancelId: 1, message: '关闭BirdShot将停止本App启动的共享服务，其他浏览器会断开。' })

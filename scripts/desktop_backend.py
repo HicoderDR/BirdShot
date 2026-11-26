@@ -34,6 +34,7 @@ from urllib.request import ProxyHandler, build_opener
 import uuid
 
 from gallery_navigation import canonical, capture_metadata, enrich_navigation, stable_id
+from review_store import ReviewStore
 
 
 REVISION = Path("revisions") / "verified-birds-birder-v2"
@@ -475,6 +476,32 @@ def aggregate_library(root, sources):
                     detail["cropMapping"] = [record for record in crop_mapping if record["groupId"] == new_id]
                     detail["selectedCrops"] = [register_media(path) for path in original.get("selectedCrops", [])]
                     details.append(detail)
+                indexed_groups = {detail["group"]["id"]: detail for detail in details}
+                for original_group in manifest.get("groups", []):
+                    new_id = group_id(original_group["id"])
+                    member_ids = [frame_ids[photo_id] for photo_id in original_group.get("photoIds", [])
+                                  if photo_id in frame_ids]
+                    if not member_ids:
+                        continue
+                    existing = indexed_groups.get(new_id)
+                    group = {**deepcopy(original_group), "id": new_id, "originalId": original_group["id"],
+                             "photoIds": member_ids, "count": len(member_ids), "thumbnail": None}
+                    frames = existing["frames"] if existing else []
+                    existing_ids = {frame["id"] for frame in frames}
+                    for frame_id in member_ids:
+                        if frame_id in existing_ids:
+                            continue
+                        frame = deepcopy(next(row for row in gallery["frames"] if row["id"] == frame_id))
+                        photo = next(row for row in photos if row["id"] == frame_id)
+                        width, height = photo.get("encodedSize") or [None, None]
+                        if photo.get("exifOrientation") in {5, 6, 7, 8}:
+                            width, height = height, width
+                        frame.update(group=new_id, originalGroupId=original_group["id"], width=width, height=height)
+                        frames.append(frame)
+                    if existing:
+                        existing["group"].update(photoIds=member_ids, count=len(member_ids))
+                    else:
+                        details.append({"group": group, "frames": frames, "cropMapping": [], "selectedCrops": []})
                 shoot_groups.extend(deepcopy(old_gallery.get("shootGroups", [])))
                 if old_gallery.get("model"):
                     gallery.setdefault("model", old_gallery["model"])
@@ -860,6 +887,12 @@ class LibraryController:
         self.validate_output(self.output_root)
         self.output_root.mkdir(parents=True, exist_ok=True)
         self.runtime = self.runtime_state()
+        try:
+            self.review = ReviewStore(self.data, self.library)
+        except Exception:
+            self.instance_lock.close()
+            self.owner.close()
+            raise
         self.persist()
         self.rebuild()
 
@@ -999,6 +1032,8 @@ class LibraryController:
 
     def rebuild(self):
         gallery = aggregate_library(self.library, self.sources)
+        self.review.refresh(self.review_busy_sources())
+        self.review.publish()
         self.view_revision += 1
         changed = False
         for error in gallery["sourceErrors"]:
@@ -1008,6 +1043,14 @@ class LibraryController:
                 changed = True
         if changed:
             self.changed()
+
+    def review_busy_sources(self):
+        return {source["id"] for source in self.sources if source.get("status") in {"queued", "processing"}
+                or source["id"] == self.worker_source}
+
+    def review_state(self):
+        self.review.refresh(self.review_busy_sources())
+        return self.review.publish()
 
     def add_source(self, path):
         path = self.validate_source(path)
@@ -1314,7 +1357,8 @@ class LibraryController:
                 probe.close()
         token = self.instance_id
         command = [sys.executable, "-B", str(self.resources / "scripts" / "batch_culling.py"),
-                   "serve", "--job", str(self.library), "--port", str(port), "--instance", token, "--read-only"]
+                   "serve", "--job", str(self.library), "--port", str(port), "--instance", token, "--read-only",
+                   "--review-state", str(self.review.path)]
         if mode == "lan":
             command += ["--lan-ip", lanIp]
         elif mode == "all":
@@ -1368,9 +1412,17 @@ class LibraryController:
 
     def dispatch(self, action, params):
         with self.lock:
+            if action.startswith("review_"):
+                self.review.refresh(self.review_busy_sources())
             actions = {"state": lambda: self.state(), "add_source": self.add_source, "attach_job": self.attach_job,
                        "remove_source": lambda id: self.remove_source(id), "rescan": lambda id: self.rescan(id),
                        "configure_service": self.configure_service, "set_output": self.set_output,
+                       "review_state": self.review_state, "review_decide": self.review.decide,
+                       "review_preferences": self.review.preferences,
+                       "review_cleanup_preview": self.review.cleanup_preview,
+                       "review_cleanup_claim": self.review.cleanup_claim,
+                       "review_cleanup_result": self.review.cleanup_result,
+                       "review_cleanup_cancel": self.review.cleanup_cancel,
                        "shutdown": lambda: self.shutdown()}
             if action not in actions:
                 raise ValueError("不支持的命令")

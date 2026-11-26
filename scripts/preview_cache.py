@@ -13,9 +13,9 @@ import uuid
 
 from PIL import Image, ImageCms, ImageOps, __version__ as PILLOW_VERSION
 
-EDGES = {960, 1920, 3840}
+EDGES = {480, 960, 1920, 3840}
 POLICY = f"exif-oriented-jpeg88-progressive-icc-v1-pillow-{PILLOW_VERSION}"
-ENTRY = re.compile(r"^[0-9a-f]{64}-(960|1920|3840)\.jpg$")
+ENTRY = re.compile(r"^[0-9a-f]{64}-(480|960|1920|3840)\.jpg$")
 
 
 def cache_io_path(path):
@@ -78,7 +78,7 @@ class PreviewCache:
 
     def describe(self, frame_id, edge=None):
         if edge is not None and edge not in EDGES:
-            raise ValueError("Preview edge must be 960, 1920 or 3840")
+            raise ValueError("Preview edge must be 480, 960, 1920 or 3840")
         photo = self.photos.get(frame_id)
         if not photo or not photo["supported"]:
             raise KeyError("Unknown or unsupported registered frame")

@@ -29,6 +29,7 @@ from PIL import Image
 
 from batch_inference import NativeDetector, INFERENCE_VERSION, ROOT
 from preview_cache import PreviewCache, not_modified
+from review_store import read_snapshot
 from species_reference import SpeciesReferences, ReferenceError
 from gallery_navigation import capture_metadata, enrich_navigation
 
@@ -516,7 +517,8 @@ def run(job, node, threads=4, on_detected=None, on_group=None, on_progress=None,
             worker.close()
 
 
-def serve(job, port, lan_ip=None, prefix=24, allow_all=False, allowed_hosts=None, instance_id=None, read_only=False):
+def serve(job, port, lan_ip=None, prefix=24, allow_all=False, allowed_hosts=None, instance_id=None, read_only=False,
+          review_state=None):
     manifest = read_json(job / "manifest.json")
     source = Path(manifest["source"]).resolve()
     photos = {p["id"]: p for p in manifest["photos"]}
@@ -624,6 +626,14 @@ def serve(job, port, lan_ip=None, prefix=24, allow_all=False, allowed_hosts=None
             self.end_headers()
         def serve_image(self, frame_id, edge=None, download=False):
             try:
+                snapshot_path = job / "review.json"
+                if review_state or snapshot_path.exists():
+                    snapshot = read_json(snapshot_path) if snapshot_path.exists() else read_snapshot(job, review_state)
+                    reviewed_frame = next((frame for group in snapshot["groups"] for frame in group["frames"]
+                                           if frame["id"] == frame_id), None)
+                    if reviewed_frame and not reviewed_frame["available"]:
+                        self.send_error(404, "Registered original unavailable; historical crops remain")
+                        return
                 info = previews.describe(frame_id, edge)
                 photo = previews.photos[frame_id]
                 primary = photo["primary"]
@@ -702,6 +712,22 @@ def serve(job, port, lan_ip=None, prefix=24, allow_all=False, allowed_hosts=None
                 self.end_headers()
                 self.write_report(data)
                 return
+            if route == "/review.json":
+                try:
+                    path = job / "review.json"
+                    payload = read_json(path) if path.exists() else read_snapshot(job, review_state)
+                    data = json.dumps(payload, ensure_ascii=False, allow_nan=False).encode("utf-8")
+                except (OSError, ValueError, KeyError, TypeError):
+                    self.send_error(503, "Review projection unavailable")
+                    return
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json; charset=utf-8")
+                self.send_header("Content-Length", str(len(data)))
+                self.send_header("Cache-Control", "no-store")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+                self.write_report(data)
+                return
             refresh_manifest()
             if route == "/species-reference":
                 name = query.get("scientificName", [""])[0]
@@ -757,9 +783,9 @@ def serve(job, port, lan_ip=None, prefix=24, allow_all=False, allowed_hosts=None
                     print("Species media client disconnected", file=sys.stderr)
                 return
             if route == "/preview" or route.startswith("/preview/"):
-                match = re.fullmatch(r"/preview/(p(?:\d{6}|[0-9a-f]{24}))/(960|1920|3840)\.jpg", route)
+                match = re.fullmatch(r"/preview/(p(?:\d{6}|[0-9a-f]{24}))/(480|960|1920|3840)\.jpg", route)
                 if not match or query:
-                    self.send_error(400, "Allowed preview edges: 960, 1920, 3840")
+                    self.send_error(400, "Allowed preview edges: 480, 960, 1920, 3840")
                     return
                 self.serve_image(match.group(1), int(match.group(2)))
                 return
@@ -771,7 +797,14 @@ def serve(job, port, lan_ip=None, prefix=24, allow_all=False, allowed_hosts=None
                 self.serve_image(match.group(1), download=bool(query))
                 return
             path = None
-            if route in {"/", "/index.html"}:
+            if route in {"/", "/index.html", "/review", "/review/", "/review-report.html"}:
+                review_page = ROOT / "scripts" / "review-report.html"
+                gallery_page = ROOT / "scripts" / "gallery-report.html"
+                path = review_page if review_page.exists() else (
+                    gallery_page if gallery_page.exists() else job / "report" / "index.html")
+            elif route in {"/review.js", "/review.css", "/review/review.js", "/review/review.css"}:
+                path = ROOT / "scripts" / route.rsplit("/", 1)[-1]
+            elif route in {"/gallery-crops", "/gallery-crops/"}:
                 gallery_page = ROOT / "scripts" / "gallery-report.html"
                 path = gallery_page if gallery_page.exists() else job / "report" / "index.html"
             elif route in {"/legacy", "/legacy/"}:
@@ -902,6 +935,7 @@ if __name__ == "__main__":
     parser.add_argument("--allowed-host", action="append", default=[], help="Additional exact local hostname/IPv4 accepted in Host")
     parser.add_argument("--instance", help="Desktop controller instance identity, exposed by /health.json")
     parser.add_argument("--read-only", action="store_true", help="Disable the legacy loopback cancel endpoint")
+    parser.add_argument("--review-state", type=Path, help="Read-only review state projection; no HTTP write endpoint")
     args = parser.parse_args()
     if args.operation == "init":
         initialize(args.source, args.output)
@@ -919,4 +953,4 @@ if __name__ == "__main__":
             lock.unlink(missing_ok=True)
     else:
         serve(args.job.resolve(strict=True), args.port, args.lan_ip, args.lan_prefix, args.allow_all, args.allowed_host,
-              args.instance, args.read_only)
+              args.instance, args.read_only, args.review_state)

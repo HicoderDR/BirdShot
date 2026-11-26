@@ -121,6 +121,8 @@ print('Public licensed birds with explicitly controlled EXIF dates; not private 
   }
   let gallery = page.frames().find(frame => frame.url().startsWith(state.service.localUrl))
   if (!gallery) gallery = await page.waitForEvent('framenavigated', { predicate: frame => frame.url().startsWith(state.service.localUrl), timeout: 30000 })
+  // Retain regression coverage for the compatible crop gallery; review has its own tests.
+  await gallery.goto(new URL('/gallery-crops/', state.service.localUrl).href)
   await gallery.locator('#gallery[aria-busy="false"]').waitFor()
   await gallery.waitForFunction(count => state.index?.items?.length === count, snapshot.items.length)
   assert.equal(await gallery.evaluate(() => typeof window.birdshotDesktop), 'undefined', 'Shared gallery never receives native IPC')

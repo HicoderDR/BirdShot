@@ -94,7 +94,7 @@ def main(args):
     source_files = [ROOT / "README.md", ROOT / "package.json", ROOT / "package-lock.json", ROOT / "LICENSE-CULLING.txt",
                     ROOT / ".gitignore", ROOT / "vite.config.ts", *ROOT.glob("tsconfig*.json"),
                     *[path for folder in ["desktop", "scripts", "src", "tests", "docs"] for path in (ROOT / folder).rglob("*")
-                      if path.is_file() and path.suffix in {".py", ".mjs", ".cjs", ".ts", ".tsx", ".html", ".css", ".md", ".json", ".txt", ".iss", ".ps1"}
+                      if path.is_file() and path.suffix in {".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".html", ".css", ".md", ".json", ".txt", ".iss", ".ps1"}
                       and "__pycache__" not in path.parts]]
     with zipfile.ZipFile(licenses / "corresponding-source.zip", "w", zipfile.ZIP_DEFLATED) as archive:
         for path in source_files:
