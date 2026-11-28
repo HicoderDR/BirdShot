@@ -10,14 +10,16 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { trustedSender, externalReference, networkSettings } from './security.mjs'
 import { checkUpdates } from './updates.mjs'
 import { createReviewNative } from './review-native.mjs'
+import { StartupState } from './startup-state.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
 const page = path.join(here, 'renderer', 'index.html')
 const pageUrl = pathToFileURL(page).href
-let window, backend, lastState, closing = false, sequence = 0, readyResolve, readyReject
+let window, backend, closing = false, sequence = 0, startupTimer
 const pending = new Map()
 const instanceId = randomUUID()
-const ready = new Promise((resolve, reject) => { readyResolve = resolve; readyReject = reject })
+const startup = new StartupState(instanceId)
+let lastState = startup.state
 const reviewNative = createReviewNative({
   command,
   busy: () => lastState?.sources?.some(source => ['processing', 'queued'].includes(source.status)) === true,
@@ -41,7 +43,6 @@ const reviewNative = createReviewNative({
     return true
   },
 })
-ready.catch(() => {})
 if (process.env.BIRDSHOT_USER_DATA) app.setPath('userData', path.resolve(process.env.BIRDSHOT_USER_DATA))
 app.setName('BirdShot')
 if (!app.requestSingleInstanceLock()) app.exit(0)
@@ -60,12 +61,10 @@ function command(action, params = {}) {
 }
 
 function receive(message) {
-  if (message.event === 'ready') {
-    if (message.instanceId !== instanceId) { readyReject(new Error('本地运行时实例身份不匹配')); return }
-    lastState = message.state
-    readyResolve(message.state)
-  } else if (message.event === 'state') {
-    lastState = message.state
+  if (['controller-ready', 'ready', 'state'].includes(message.event)) {
+    if (!startup.accept(message)) { console.error('Rejected a stale or mismatched backend state event'); return }
+    lastState = startup.state
+    if (startup.connected) clearTimeout(startupTimer)
   } else if (message.id) {
     const request = pending.get(String(message.id))
     if (request) {
@@ -81,6 +80,10 @@ function receive(message) {
 }
 
 async function launchBackend() {
+  if (backend && backend.exitCode === null) return
+  clearTimeout(startupTimer)
+  lastState = startup.reset(lastState)
+  if (window && !window.isDestroyed()) window.webContents.send('birdshot:state-updated', lastState)
   const resource = app.isPackaged ? path.join(process.resourcesPath, 'backend') : path.resolve(here, '..')
   const python = app.isPackaged ? path.join(process.resourcesPath, 'runtime', 'python', 'python.exe') :
     process.env.BIRDSHOT_PYTHON || path.join(resource, '.tools', 'venv', 'Scripts', 'python.exe')
@@ -89,6 +92,7 @@ async function launchBackend() {
   const data = app.getPath('userData')
   await mkdir(data, { recursive: true })
   const log = path.join(data, 'runtime.log')
+  await appendFile(log, JSON.stringify({ event: 'desktop-startup', time: new Date().toISOString(), instanceId }) + '\n')
   if (!existsSync(python) || !existsSync(node)) throw new Error('包内Python/Node运行时缺失；请重新解压完整便携包')
   const env = { ...process.env, PYTHONNOUSERSITE: '1', PYTHONDONTWRITEBYTECODE: '1', PYTHONUTF8: '1',
     BIRDSHOT_MODEL_CACHE: app.isPackaged ? path.join(resource, 'models') : path.join(resource, '.tools', 'species-models') }
@@ -96,32 +100,50 @@ async function launchBackend() {
   for (const key of Object.keys(env)) {
     if (/^(?:PYTHONHOME|PYTHONPATH|VIRTUAL_ENV|DONGNIAO_API_KEY|GH_TOKEN|GITHUB_TOKEN|COPILOT_GH_ACCOUNT_|HF_TOKEN|HUGGING_FACE_HUB_TOKEN|HUGGINGFACE_HUB_TOKEN|WANDB_API_KEY)/i.test(key)) delete env[key]
   }
-  backend = spawn(python, [path.join(resource, 'scripts', 'desktop_backend.py'), '--data', data,
+  const child = spawn(python, [path.join(resource, 'scripts', 'desktop_backend.py'), '--data', data,
     '--resources', resource, '--node', node, '--instance', instanceId],
   { shell: false, windowsHide: true, cwd: data, env, stdio: ['pipe', 'pipe', 'pipe'] })
-  const lines = createInterface({ input: backend.stdout })
+  backend = child
+  const lines = createInterface({ input: child.stdout })
   lines.on('line', line => {
+    if (backend !== child) return
     try { receive(JSON.parse(line)) }
     catch { appendFile(log, '运行时协议错误；请检查此包是否完整。\n').catch(() => {}) }
   })
-  backend.stderr.on('data', data => appendFile(log, data).catch(() => {}))
-  backend.on('error', error => readyReject(new Error('无法启动包内Python：' + error.message)))
-  backend.on('exit', (code, signal) => {
-    const error = new Error('本地运行时已退出（' + String(code ?? signal) + '），请重新打开App并检查日志')
-    readyReject(error)
+  child.stderr.on('data', data => appendFile(log, data).catch(() => {}))
+  child.on('error', error => {
+    if (backend !== child) return
+    backend = undefined
+    clearTimeout(startupTimer)
     for (const request of pending.values()) { clearTimeout(request.timer); request.reject(error) }
     pending.clear()
-    if (!closing) receive({ event: 'state', state: { ...lastState, runtime: { ready: false, error: error.message },
-      service: { ...lastState?.service, status: 'error', error: error.message } } })
+    lastState = startup.fail('无法启动包内Python：' + error.message)
+    window?.webContents.send('birdshot:state-updated', lastState)
+    appendFile(log, JSON.stringify({ event: 'spawn-error', message: error.message }) + '\n').catch(console.error)
   })
-  const timeout = setTimeout(() => readyReject(new Error('本地运行时初始化超时；模型校验或启动失败，请查看日志')), 60000)
-  try { await ready } finally { clearTimeout(timeout) }
+  child.on('exit', (code, signal) => {
+    if (backend !== child) return
+    const error = new Error('本地运行时已退出（' + String(code ?? signal) + '），请重新打开App并检查日志')
+    clearTimeout(startupTimer)
+    for (const request of pending.values()) { clearTimeout(request.timer); request.reject(error) }
+    pending.clear()
+    if (!closing) {
+      lastState = startup.fail(error.message)
+      window?.webContents.send('birdshot:state-updated', lastState)
+      appendFile(log, JSON.stringify({ event: 'backend-exit', code, signal }) + '\n').catch(console.error)
+    }
+  })
+  startupTimer = setTimeout(() => {
+    lastState = startup.warn()
+    window?.webContents.send('birdshot:state-updated', lastState)
+    appendFile(log, JSON.stringify({ event: 'startup-slow', terminal: false }) + '\n').catch(console.error)
+  }, 60000)
 }
 
 function handler(channel, callback, requireRuntime = true) {
   ipcMain.handle(channel, async (event, ...args) => {
     if (!window || !trustedSender(event, window.webContents, pageUrl)) throw new Error('此操作仅限当前桌面管理窗口')
-    if (requireRuntime) await ready
+    if (requireRuntime && !startup.connected) throw new Error('本机控制通道仍在初始化，请查看启动阶段或重试启动；未重复运行任务')
     return callback(...args)
   })
 }
@@ -135,13 +157,26 @@ async function choose(action, title) {
 }
 
 function registerIpc() {
+  handler('birdshot:retry-startup', async () => {
+    if (startup.connected) return command('retry_startup').then(() => command('state'))
+    if (!backend || backend.exitCode !== null) {
+      try { await launchBackend() }
+      catch (error) {
+        lastState = startup.fail(error.message)
+        window?.webContents.send('birdshot:state-updated', lastState)
+        throw error
+      }
+    }
+    else lastState = startup.warn()
+    return lastState
+  }, false)
   handler('birdshot:review', (action, params) => reviewNative(action, params))
   handler('birdshot:check-updates', async () => {
     const version = app.isPackaged ? app.getVersion() :
       JSON.parse(await readFile(path.resolve(here, '..', 'package.json'))).desktopVersion
     return checkUpdates(version, fetch, process.env.BIRDSHOT_OFFLINE === '1')
   }, false)
-  handler('birdshot:state', () => command('state'))
+  handler('birdshot:state', () => startup.connected ? command('state') : lastState, false)
   handler('birdshot:choose-source', () => choose('add_source', '添加照片文件夹（原片只读）'))
   handler('birdshot:attach-existing', () => choose('attach_job', '加载已有BirdShot批次输出（不重跑模型）'))
   handler('birdshot:choose-output', () => choose('set_output', '选择派生输出目录（不能在原片内）'))
@@ -209,7 +244,7 @@ app.whenReady().then(async () => {
   if (closing) return
   try { await launchBackend() }
   catch (error) {
-    lastState = { runtime: { ready: false, error: error.message }, sources: [], service: { status: 'error', error: error.message } }
+    lastState = startup.fail(error.message)
     window.webContents.send('birdshot:state-updated', lastState)
     dialog.showErrorBox('BirdShot本地运行时启动失败', error.message)
   }

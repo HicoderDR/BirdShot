@@ -320,7 +320,12 @@ class IncrementalTests(unittest.TestCase):
                 return
             def server_close(self):
                 return
-        with patch.object(batch_culling, "ThreadingHTTPServer", Server):
+        def inline_startup(*, target, **_):
+            thread = Mock()
+            thread.start.side_effect = target
+            return thread
+        with patch.object(batch_culling, "ThreadingHTTPServer", Server), \
+                patch.object(batch_culling.threading, "Thread", inline_startup):
             batch_culling.serve(job, 60000, read_only=True)
         handler = handlers[0].__new__(handlers[0])
         handler.allowed = lambda: True

@@ -52,8 +52,18 @@ print('Public licensed birds with explicitly controlled EXIF dates; not private 
     app = await _electron.launch({ executablePath: path.join(relocated, 'BirdShot.exe'), cwd: temp, env, timeout: 90000 })
     const page = await app.firstWindow()
     await page.waitForFunction(() => !!window.birdshotDesktop, undefined, { timeout: 30000 })
-    const state = await page.evaluate(() => window.birdshotDesktop.getState())
-    assert.equal(state.runtime.ready, true, JSON.stringify(state.runtime))
+    let state
+    const deadline = Date.now() + 180000
+    do {
+      state = await page.evaluate(() => window.birdshotDesktop.getState())
+      if (state.runtime.ready && state.service.status === 'ready') break
+      if (state.startup?.status === 'error') {
+        if (blocker && state.service.suggestedPort && state.runtime.models.every(model => model.verified)) break
+        throw new Error(JSON.stringify(state.startup))
+      }
+      await page.waitForTimeout(500)
+    } while (Date.now() < deadline)
+    assert.equal(state.runtime.ready, state.service.status === 'ready', JSON.stringify(state.runtime))
     assert.equal(state.runtime.mode, 'packaged-verified')
     assert.ok(state.runtime.models.every(model => model.verified && model.path.startsWith(relocated)))
     return page
@@ -87,6 +97,7 @@ print('Public licensed birds with explicitly controlled EXIF dates; not private 
     assert.equal(conflict.service.status, 'error')
     assert.ok(conflict.service.suggestedPort > 5274)
     await page.evaluate(settings => window.birdshotDesktop.configureService(settings), { mode: 'local', port: conflict.service.suggestedPort })
+    await waitState(page, state => state.runtime.ready && state.service.status === 'ready')
     await new Promise(resolve => blocker.close(resolve)); blocker = null
     proof.occupiedPortReportedAndExplicitAlternativePersisted = true
   }
@@ -153,6 +164,7 @@ print('Public licensed birds with explicitly controlled EXIF dates; not private 
   const lan = process.env.BIRDSHOT_TEST_LAN_IP
   if (lan) {
     state = await page.evaluate(settings => window.birdshotDesktop.configureService(settings), { mode: 'lan', port: state.service.port, lanIp: lan })
+    state = await waitState(page, state => state.service.status === 'ready')
     assert.equal(state.service.status, 'ready', JSON.stringify(state.service))
     const lanUrl = 'http://' + lan + ':' + state.service.port + '/'
     const response = await fetch(lanUrl)
@@ -170,9 +182,11 @@ print('Public licensed birds with explicitly controlled EXIF dates; not private 
     }
     assert.equal((await fetch(new URL('cancel', lanUrl), { method: 'POST' })).status, 403)
     state = await page.evaluate(settings => window.birdshotDesktop.configureService(settings), { mode: 'all', port: state.service.port, lanIp: lan })
+    state = await waitState(page, state => state.service.status === 'ready')
     assert.equal(state.service.status, 'ready')
     assert.equal((await fetch(lanUrl)).headers.get('X-BirdShot-Access-Mode'), 'all-sources-read-only')
     state = await page.evaluate(settings => window.birdshotDesktop.configureService(settings), { mode: 'local', port: state.service.port })
+    state = await waitState(page, state => state.service.status === 'ready')
     assert.equal(state.service.status, 'ready')
     await assert.rejects(fetch(lanUrl))
     assert.equal((await fetch(state.service.localUrl)).status, 200)

@@ -4,6 +4,7 @@ const { contextBridge, ipcRenderer } = require('electron')
 if (process.isMainFrame) {
   contextBridge.exposeInMainWorld('birdshotDesktop', Object.freeze({
     getState: () => ipcRenderer.invoke('birdshot:state'),
+    retryStartup: () => ipcRenderer.invoke('birdshot:retry-startup'),
     review: (action, params) => ipcRenderer.invoke('birdshot:review', action, params),
     onReviewProgress: callback => {
       const handler = (_event, progress) => callback(progress)

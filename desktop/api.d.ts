@@ -36,6 +36,8 @@ export interface Source {
 export interface State {
   version: 1
   instanceId: string
+  startup?: { status: 'initializing' | 'ready' | 'error' | 'stopped'; phase: string;
+    message?: string; warning?: string; error?: string; processed?: number; total?: number }
   runtime: {
     ready: boolean
     mode?: 'packaged-verified' | 'development-unverified'
@@ -56,6 +58,7 @@ export interface State {
 
 export interface DesktopAPI {
   getState(): Promise<State>
+  retryStartup(): Promise<State>
   review(action: 'state' | 'decide' | 'preferences' | 'cleanupPreview' | 'cleanupExecute' | 'cleanupCancel',
     params?: Record<string, unknown>): Promise<unknown>
   onReviewProgress(listener: (progress: { token: string; completed: number; total: number }) => void): () => void

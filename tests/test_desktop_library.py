@@ -524,9 +524,11 @@ class DesktopLibraryTests(unittest.TestCase):
             capture_output=True, encoding="utf-8", timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
         messages = [json.loads(line) for line in result.stdout.splitlines()]
-        ready = next(message for message in messages if message.get("event") == "ready")
+        ready = next(message for message in messages if message.get("event") == "controller-ready")
         self.assertEqual(ready["instanceId"], "jsonl-test")
-        self.assertEqual(ready["state"]["service"]["status"], "ready")
+        self.assertEqual(ready["state"]["service"]["status"], "starting")
+        self.assertFalse(ready["state"]["runtime"]["ready"])
+        self.assertFalse(any(message.get("event") == "ready" for message in messages))
         responses = {message["id"]: message for message in messages if "id" in message}
         self.assertTrue(responses[1]["ok"])
         self.assertFalse(responses[2]["ok"])

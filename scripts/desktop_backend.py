@@ -5,7 +5,7 @@ Run with --data USER_DATA --resources BACKEND_ROOT --node NODE --instance UUID.
 Only JSONL responses/events go to stdout. Inference and gallery service output is
 captured in USER_DATA/logs; no HTTP management endpoint is created.
 
-Actions: state, add_source{path}, attach_job{path}, remove_source{id},
+Actions: state, retry_startup, add_source{path}, attach_job{path}, remove_source{id},
 rescan{id}, configure_service{mode,port,lanIp?}, set_output{path}, shutdown.
 Sources/configuration persist in desktop-library.json; jobs live beneath the
 selected output root, while the registered aggregate and caches stay in userData.
@@ -331,23 +331,29 @@ def extend_job(job, incoming):
     return sorted(affected)
 
 
-def aggregate_library(root, sources):
+def aggregate_library(root, sources, progress=None, strict=False):
     """Derive a registered multi-root view; never copy media or write old jobs."""
     root = Path(root)
     photos, items, details, media, crop_mapping, shoot_groups = [], [], [], {}, [], []
     seen = set()
     processed_ids, failed_ids = set(), set()
     errors = []
+    report = progress or (lambda *args: None)
+    total = sum(len(source.get("jobs", [])) for source in sources)
+    processed = 0
+    report("library", 0, total)
     gallery = {"version": 1, "analysisVersion": "desktop-library-v1", "revision": "desktop-library-v1",
                "status": "completed", "updatedAt": datetime.now().isoformat(),
                "items": items, "frames": [], "shootGroups": shoot_groups, "sourceErrors": errors}
     gallery["sourceIssues"] = [{"sourceId": source["id"], **issue} for source in sources for issue in source.get("sourceIssues", [])]
     for source in sources:
         for job_record in sorted(source.get("jobs", []), key=lambda row: not row.get("overlay", False)):
+            report("library", processed, total)
             job = Path(job_record["path"])
             if not (job / "manifest.json").is_file():
                 if source.get("status") not in {"queued", "processing"}:
                     errors.append({"sourceId": source["id"], "job": str(job), "error": "批次清单尚不可用"})
+                processed += 1
                 continue
             try:
                 _, manifest = read_job(job)
@@ -362,18 +368,19 @@ def aggregate_library(root, sources):
                     and isinstance(saved_progress.get("processed"), (int, float))
                     and saved_progress["processed"] >= len(saved_items))
                 job_key = stable_id("", canonical(job))
+                job_root = str(job.resolve())
                 frame_ids, group_ids = {}, {}
                 def group_id(old_id):
                     return group_ids.setdefault(old_id, stable_id("g", [job_key, old_id]))
                 def register_media(relative):
                     if not relative:
                         return relative
-                    relative_path = Path(relative)
-                    if relative_path.is_absolute() or ".." in relative_path.parts:
+                    relative_path, windows = Path(relative), PureWindowsPath(relative)
+                    if relative_path.is_absolute() or windows.anchor or ".." in relative_path.parts or ".." in windows.parts:
                         raise ValueError("批次媒体包含越界路径")
                     relative = relative_path.as_posix()
                     alias = f"jobs/{job_key}/{relative}"
-                    media[alias] = {"path": alias, "root": str(job.resolve()), "relative": relative}
+                    media[alias] = {"path": alias, "root": job_root, "relative": relative}
                     return alias
                 for photo in manifest["photos"]:
                     original_root = photo.get("sourceRoot") or manifest["source"]
@@ -446,7 +453,9 @@ def aggregate_library(root, sources):
                 group_dir = job / REVISION / "groups"
                 if not group_dir.is_dir():
                     group_dir = job / "groups"
-                for group_file in sorted(group_dir.glob("g*.json")):
+                group_files = sorted(group_dir.glob("g*.json"))
+                for index, group_file in enumerate(group_files):
+                    report("library-groups", index, len(group_files))
                     original = read_json(group_file)
                     frames = [frame for frame in original.get("frames", []) if frame["id"] in frame_ids]
                     if not frames:
@@ -509,6 +518,10 @@ def aggregate_library(root, sources):
                     gallery.setdefault("policy", old_gallery["policy"])
             except (OSError, ValueError, KeyError, TypeError) as error:
                 errors.append({"sourceId": source["id"], "job": str(job), "error": str(error)})
+            processed += 1
+            report("library", processed, total)
+    if strict and errors:
+        raise RuntimeError("; ".join(row["error"] for row in errors))
     manifest = {"version": 1, "source": str(root), "sourceRoots": sorted({photo["sourceRoot"] for photo in photos}),
                 "photos": photos, "groups": [detail["group"] for detail in details],
                 "mediaRoots": sorted({record["root"] for record in media.values()}), "media": list(media.values()),
@@ -545,9 +558,12 @@ def aggregate_library(root, sources):
     gallery["originalPhotoCount"] = len(photos)
     gallery["groups"] = details
     gallery = enrich_navigation(gallery, manifest)
-    for detail in gallery.pop("groups"):
+    published_groups = gallery.pop("groups")
+    for index, detail in enumerate(published_groups):
+        report("library-publish", index, len(published_groups))
         atomic_json(root / REVISION / "groups" / (detail["group"]["id"] + ".json"), detail)
         atomic_json(root / "groups" / (detail["group"]["id"] + ".json"), detail)
+    report("library-publish", len(published_groups), len(published_groups))
     atomic_json(root / "mapping.json", {"sourceRoots": manifest["sourceRoots"], "crops": crop_mapping})
     atomic_json(root / "groups.json", manifest["groups"])
     atomic_json(root / "status.json", {"status": gallery["status"], "totalPhotos": len(photos), "cropCount": len(items)})
@@ -826,7 +842,8 @@ class ProcessOwner:
 
 
 class LibraryController:
-    def __init__(self, data, resources, node, instance_id, emit=None, own_process=False):
+    def __init__(self, data, resources, node, instance_id, emit=None, own_process=False,
+                 defer_initialization=False):
         self.data = Path(data).resolve()
         self.resources = Path(resources).resolve(strict=True)
         self.read_only_resources = self.resources.parent if self.resources.name.casefold() == "backend" else self.resources
@@ -838,6 +855,8 @@ class LibraryController:
         (self.data / "logs").mkdir(exist_ok=True)
         self.library = self.data / "library"
         self.lock = threading.RLock()
+        self.action_lock = threading.RLock()
+        self.start_lock = threading.Lock()
         self.emit = emit or (lambda value: None)
         self.closed = threading.Event()
         self.owner = ProcessOwner(include_current=own_process)
@@ -845,6 +864,18 @@ class LibraryController:
         self.worker_source = None
         self.pending_inventories = {}
         self.verified_assets = {}
+        self.defer_initialization = defer_initialization
+        self.initialized = False
+        self.library_initialized = False
+        self.model_ready = False
+        self.initialization_thread = None
+        self.thread = None
+        self.review = None
+        self.started_at = time.monotonic()
+        self.progress_emitted_at = 0
+        self.startup = {"status": "initializing", "phase": "config", "processed": 0, "total": 0,
+                        "message": "已载入配置，等待验证本地资源", "seconds": 0}
+        self.runtime = {"ready": False, "status": "initializing", "models": []}
         self.config_path = self.data / "desktop-library.json"
         self.instance_lock = (self.data / "controller.lock").open("a+b")
         try:
@@ -864,7 +895,7 @@ class LibraryController:
             self.owner.close()
             raise RuntimeError("此 userData 已有桌面控制器运行，未启动第二个实例")
         saved = read_json(self.config_path) if self.config_path.exists() else {}
-        if saved and saved.get("version", 1) != 1:
+        if not isinstance(saved, dict) or saved and saved.get("version", 1) != 1:
             self.instance_lock.close()
             self.owner.close()
             raise RuntimeError("不支持的照片库配置版本；未覆盖配置或已有结果")
@@ -872,11 +903,33 @@ class LibraryController:
                              if key not in {"version", "outputRoot", "service", "sources", "detachedSources"}}
         self.sources = saved.get("sources", [])
         self.detached_sources = saved.get("detachedSources", [])
+        if not isinstance(self.sources, list) or not isinstance(self.detached_sources, list) or any(
+                not isinstance(source, dict) or not isinstance(source.get("path"), str)
+                or not isinstance(source.get("id"), str) or not isinstance(source.get("jobs", []), list)
+                for source in self.sources + self.detached_sources):
+            self.instance_lock.close()
+            self.owner.close()
+            raise ValueError("照片库来源配置无效；未覆盖已有结果")
+        self.sources_view = self.source_view()
         self.output_root = Path(saved.get("outputRoot", self.data / "output")).resolve()
         self.service_config = saved.get("service", {"mode": "local", "port": 5274})
-        self.service = {"status": "stopped", **self.service_config, "localUrl": None, "lanUrls": []}
+        self.service = {"status": "starting" if defer_initialization else "stopped",
+                        **self.service_config, "localUrl": None, "lanUrls": []}
         self.view_revision = 0
-        for source in self.sources:
+        self.validate_output(self.output_root)
+        if not defer_initialization:
+            try:
+                self.initialize()
+            except Exception:
+                self.instance_lock.close()
+                self.owner.close()
+                raise
+
+    def initialize(self):
+        self.library_initialized = False
+        self.startup_progress("sources", 0, len(self.sources))
+        for index, source in enumerate(self.sources):
+            self.startup_progress("sources", index, len(self.sources))
             if source.get("status") == "processing":
                 source["status"] = "queued"
             if source.get("scanRequested") and source.get("status") != "queued":
@@ -884,19 +937,51 @@ class LibraryController:
             error = source_error(source["path"])
             if error:
                 source.update(status="error", error=error)
-        self.validate_output(self.output_root)
+        with self.lock:
+            self.sources_view = self.source_view()
+        self.startup_progress("sources", len(self.sources), len(self.sources))
         self.output_root.mkdir(parents=True, exist_ok=True)
-        self.runtime = self.runtime_state()
-        try:
-            self.review = ReviewStore(self.data, self.library)
-        except Exception:
-            self.instance_lock.close()
-            self.owner.close()
-            raise
+        self.startup_progress("models", 0, 0)
+        runtime = self.runtime_state(progress=self.startup_progress)
+        self.model_ready = runtime["ready"]
+        if self.defer_initialization and not runtime["ready"]:
+            with self.lock:
+                self.runtime = {**runtime, "ready": False, "status": "error"}
+            errors = [model["error"] for model in runtime["models"] if model.get("error")]
+            errors += [asset["error"] for asset in runtime.get("assetErrors", [])]
+            raise RuntimeError(runtime.get("error") or "; ".join(errors) or "随包模型未就绪")
+        with self.lock:
+            self.runtime = {**runtime, "ready": False, "status": "initializing"} if self.defer_initialization else runtime
+        self.startup_progress("review-state", 0, 1)
+        self.review = ReviewStore(self.data, self.library)
+        self.rebuild(progress=self.startup_progress)
+        self.startup_progress("review-state", 1, 1)
+        if self.closed.is_set():
+            return
         self.persist()
-        self.rebuild()
+        with self.lock:
+            if self.closed.is_set():
+                return
+            self.library_initialized = True
+        if not self.defer_initialization:
+            self.initialized = True
+            self.startup_progress("ready", 1, 1, status="ready")
 
-    def runtime_state(self):
+    def startup_progress(self, phase, processed=0, total=0, status="initializing", **extra):
+        if self.closed.is_set():
+            raise InterruptedError("启动已取消")
+        now = time.monotonic()
+        with self.lock:
+            force = phase != self.startup["phase"] or status != self.startup["status"] or extra
+            self.startup = {"status": status, "phase": phase, "processed": processed, "total": total,
+                            "seconds": round(now - self.started_at, 2), **extra}
+            publish = force or now - self.progress_emitted_at >= .25 or processed == total
+            if publish:
+                self.progress_emitted_at = now
+        if publish:
+            self.emit({"event": "state", "instanceId": self.instance_id, "state": self.state()})
+
+    def runtime_state(self, progress=None):
         paths = {
             "bird-segmentation": self.resources / "public" / "culling" / "models" / "bird-yolo11s-seg.onnx",
             "bird-pose": self.resources / "public" / "culling" / "models" / "eye.onnx",
@@ -949,6 +1034,8 @@ class LibraryController:
                 digest = hashlib.sha256()
                 with path.open("rb") as stream:
                     for block in iter(lambda: stream.read(1024 * 1024), b""):
+                        if self.closed.is_set():
+                            raise InterruptedError("启动已取消")
                         digest.update(block)
                 if digest.hexdigest() != asset["sha256"]:
                     raise ValueError("随包资源 SHA256 校验失败")
@@ -972,11 +1059,15 @@ class LibraryController:
                 model["error"] = str(error)
             models.append(model)
         asset_errors = []
-        for path, asset in assets.items():
+        for index, (path, asset) in enumerate(assets.items()):
+            if progress:
+                progress("models", index, len(assets))
             try:
                 verify_asset(Path(path), asset)
             except (OSError, ValueError, KeyError, TypeError) as error:
                 asset_errors.append({"path": asset.get("path"), "error": str(error)})
+        if progress:
+            progress("models", len(assets), len(assets))
         missing = [name for name in ("cv2", "onnxruntime", "PIL", "birder", "torch")
                    if importlib.util.find_spec(name) is None]
         for name in ("candidates.json", "taxonomy-ebird2025-zh-SIM.json"):
@@ -995,8 +1086,9 @@ class LibraryController:
         with self.lock:
             return {"version": 1, "instanceId": self.instance_id, "viewRevision": self.view_revision,
                     "runtime": deepcopy(self.runtime),
-                    "sources": [{key: deepcopy(value) for key, value in source.items() if key != "jobs"}
-                                for source in self.sources],
+                    "startup": {**deepcopy(self.startup), "seconds": round(time.monotonic() - self.started_at, 2)}
+                    if self.startup["status"] == "initializing" else deepcopy(self.startup),
+                    "sources": deepcopy(self.sources_view),
                     "outputRoot": str(self.output_root), "service": deepcopy(self.service)}
 
     def persist(self):
@@ -1004,9 +1096,17 @@ class LibraryController:
                                       "service": self.service_config, "sources": self.sources,
                                       "detachedSources": self.detached_sources})
 
+    def source_view(self):
+        return [{key: deepcopy(value) for key, value in source.items() if key != "jobs"}
+                for source in self.sources]
+
     def changed(self):
+        if self.closed.is_set():
+            return
         self.persist()
-        self.emit({"event": "state", "state": self.state()})
+        with self.lock:
+            self.sources_view = self.source_view()
+        self.emit({"event": "state", "instanceId": self.instance_id, "state": self.state()})
 
     def validate_output(self, output, additional=None):
         for source in self.sources + self.detached_sources + ([additional] if additional else []):
@@ -1030,9 +1130,16 @@ class LibraryController:
         self.validate_output(self.output_root, {"path": str(path)})
         return path
 
-    def rebuild(self):
-        gallery = aggregate_library(self.library, self.sources)
-        self.review.refresh(self.review_busy_sources())
+    def rebuild(self, progress=None):
+        strict = self.defer_initialization and progress is not None
+        gallery = aggregate_library(self.library, self.sources, progress=progress, strict=strict)
+        if strict and gallery["sourceErrors"]:
+            raise RuntimeError("; ".join(row["error"] for row in gallery["sourceErrors"]))
+        if progress:
+            progress("review", 0, 0)
+        self.review.refresh(self.review_busy_sources(), progress=progress)
+        if progress:
+            progress("review-publish", 0, 1)
         self.review.publish()
         self.view_revision += 1
         changed = False
@@ -1333,6 +1440,13 @@ class LibraryController:
             address = ipaddress.IPv4Address(lanIp or "")
             if not any(address in ipaddress.IPv4Network(block) for block in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")):
                 raise ValueError("请选择明确的物理局域网 IPv4 地址")
+        if self.closed.is_set():
+            raise RuntimeError("控制器已关闭")
+        if self.defer_initialization:
+            with self.lock:
+                self.initialized = False
+                self.runtime.update(ready=False, status="initializing")
+            self.startup_progress("service", 0, 1)
         self.owner.stop(self.server)
         self.server = None
         self.service_config = {"mode": mode, "port": port, **({"lanIp": lanIp} if mode == "lan" else {})}
@@ -1364,30 +1478,91 @@ class LibraryController:
         elif mode == "all":
             command += ["--allow-all"]
         try:
-            self.server = self.launch(command, "gallery-" + self.instance_id + ".log")
-            opener = build_opener(ProxyHandler({}))
-            deadline = time.monotonic() + 20
-            while time.monotonic() < deadline:
-                if self.server.poll() is not None:
-                    raise RuntimeError("图库服务退出；详见 userData/logs/gallery-" + self.instance_id + ".log")
-                try:
-                    with opener.open(f"http://127.0.0.1:{port}/health.json", timeout=.5) as response:
-                        health = json.load(response)
-                    if health.get("instanceId") != token:
-                        raise RuntimeError("端口属于另一个服务实例，拒绝连接")
-                    self.service.update(status="ready", localUrl=f"http://127.0.0.1:{port}/",
-                                        lanUrls=self.lan_urls(mode, port, lanIp))
-                    self.changed()
-                    return deepcopy(self.service)
-                except (OSError, ValueError):
-                    time.sleep(.1)
-            raise RuntimeError("图库服务健康检查超时，未连接未确认身份的实例")
+            with self.lock:
+                if self.closed.is_set():
+                    raise RuntimeError("控制器已关闭")
+                self.service_started_at = time.monotonic()
+                self.server = self.launch(command, "gallery-" + self.instance_id + ".log")
+            if not self.defer_initialization:
+                deadline = time.monotonic() + 20
+                while not self.closed.is_set() and time.monotonic() < deadline:
+                    self.poll_service()
+                    if self.service["status"] != "starting":
+                        break
+                    self.closed.wait(.1)
+            return deepcopy(self.service)
         except (OSError, RuntimeError) as error:
             self.owner.stop(self.server)
             self.server = None
             self.service.update(status="error", error=str(error), suggestedPort=self.available_port(port + 1))
             self.changed()
             return deepcopy(self.service)
+
+    def startup_failed(self, error):
+        if self.closed.is_set():
+            return
+        with self.lock:
+            self.initialized = False
+            self.runtime.update(ready=False, status="error")
+            self.service.update(status="error", error=str(error), localUrl=None, lanUrls=[])
+        self.startup_progress(self.startup["phase"], self.startup.get("processed", 0),
+                              self.startup.get("total", 0), status="error", error=str(error))
+        print("Desktop startup failed: " + str(error), file=sys.stderr, flush=True)
+
+    def poll_service(self):
+        server = self.server
+        if server is None or self.closed.is_set():
+            return
+        if server.poll() is not None:
+            if self.server is server:
+                self.server = None
+                self.startup_failed("图库服务退出；详见 userData/logs/gallery-" + self.instance_id + ".log")
+            return
+        if self.service["status"] != "starting":
+            return
+        try:
+            opener = build_opener(ProxyHandler({}))
+            port = self.service_config["port"]
+            with opener.open(f"http://127.0.0.1:{port}/health.json", timeout=.5) as response:
+                try:
+                    health = json.load(response)
+                except ValueError as error:
+                    raise RuntimeError("图库服务健康响应无效，未确认实例身份") from error
+            if not isinstance(health, dict) or health.get("instanceId") != self.instance_id:
+                raise RuntimeError("端口属于另一个服务实例，拒绝连接")
+            if health.get("status") == "error":
+                raise RuntimeError(health.get("error") or "图库服务初始化失败")
+            if health.get("status") != "ready":
+                if health.get("status") != "starting":
+                    raise RuntimeError("图库服务健康状态无效，拒绝连接")
+                progress = health.get("startup") or {}
+                self.startup_progress("service", progress.get("processed", 0), progress.get("total", 1),
+                                      message=progress.get("message", "图库服务正在验证注册媒体"))
+                return
+            if self.server is not server or self.closed.is_set():
+                return
+            with self.lock:
+                self.service.update(status="ready", localUrl=f"http://127.0.0.1:{port}/",
+                                    lanUrls=self.lan_urls(self.service_config["mode"], port,
+                                                          self.service_config.get("lanIp")))
+                self.service.pop("warning", None)
+                self.service.pop("error", None)
+                if self.defer_initialization:
+                    self.initialized = True
+                    self.runtime.update(ready=self.model_ready, status="ready")
+            self.changed()
+            if self.defer_initialization:
+                self.startup_progress("ready", 1, 1, status="ready")
+                self.emit({"event": "ready", "instanceId": self.instance_id, "state": self.state()})
+        except (OSError, ValueError):
+            if time.monotonic() - self.service_started_at >= 20 and not self.service.get("warning"):
+                self.service["warning"] = "图库服务仍在启动，继续等待本实例健康检查；未停止正在初始化的进程"
+                self.startup_progress("service", 0, 1, warning=self.service["warning"])
+        except RuntimeError as error:
+            if self.server is server:
+                self.owner.stop(server)
+                self.server = None
+                self.startup_failed(error)
 
     @staticmethod
     def lan_urls(mode, port, lan_ip):
@@ -1411,7 +1586,21 @@ class LibraryController:
         return {"outputRoot": str(output)}
 
     def dispatch(self, action, params):
-        with self.lock:
+        if action == "state":
+            return self.state()
+        if action == "shutdown":
+            return self.shutdown()
+        if action == "retry_startup":
+            return self.retry_startup()
+        def allowed():
+            return self.initialized or action == "configure_service" and self.library_initialized and \
+                self.model_ready and self.startup["status"] == "error"
+        if not allowed() or self.closed.is_set():
+            raise RuntimeError("初始化中或初始化失败；请等待启动完成或重试启动" if not self.closed.is_set()
+                               else "控制器已关闭")
+        with self.action_lock:
+            if not allowed() or self.closed.is_set():
+                raise RuntimeError("初始化中或控制器已关闭")
             if action.startswith("review_"):
                 self.review.refresh(self.review_busy_sources())
             actions = {"state": lambda: self.state(), "add_source": self.add_source, "attach_job": self.attach_job,
@@ -1427,6 +1616,8 @@ class LibraryController:
             if action not in actions:
                 raise ValueError("不支持的命令")
             result = actions[action](**params)
+            if action == "configure_service" and self.defer_initialization and result["status"] == "error":
+                self.startup_failed(result.get("error") or "图库服务启动失败")
             if action in {"add_source", "attach_job", "rescan"}:
                 return {key: deepcopy(value) for key, value in result.items() if key != "jobs"}
             return result
@@ -1435,12 +1626,11 @@ class LibraryController:
         last_check = 0
         while not self.closed.wait(.5):
             try:
-                with self.lock:
+                self.poll_service()
+                if not self.initialized:
+                    continue
+                with self.action_lock:
                     self.poll_worker()
-                    if self.server and self.server.poll() is not None:
-                        self.server = None
-                        self.service.update(status="error", localUrl=None, lanUrls=[], error="图库服务意外退出，请重新配置服务以重试")
-                        self.changed()
                     if time.monotonic() - last_check > 5:
                         last_check = time.monotonic()
                         for source in self.sources:
@@ -1463,10 +1653,50 @@ class LibraryController:
                 traceback.print_exc(file=sys.stderr)
 
     def start(self):
-        self.configure_service(**self.service_config)
-        self.emit({"event": "ready", "instanceId": self.instance_id, "state": self.state()})
+        if self.thread is not None or self.closed.is_set():
+            return
+        self.emit({"event": "controller-ready", "instanceId": self.instance_id, "state": self.state()})
         self.thread = threading.Thread(target=self.background, name="desktop-library", daemon=True)
         self.thread.start()
+        if self.defer_initialization:
+            self.retry_startup()
+        else:
+            self.configure_service(**self.service_config)
+            if self.service["status"] == "ready" and self.runtime["ready"]:
+                self.emit({"event": "ready", "instanceId": self.instance_id, "state": self.state()})
+
+    def retry_startup(self):
+        with self.start_lock:
+            if self.closed.is_set():
+                raise RuntimeError("控制器已关闭，不能重试启动")
+            if self.initialization_thread and self.initialization_thread.is_alive() or self.server and \
+                    self.service["status"] == "starting" or self.initialized:
+                return self.state()
+            self.started_at = time.monotonic()
+            self.runtime.update(ready=False, status="initializing")
+            self.service.update(status="starting", localUrl=None, lanUrls=[])
+            self.service.pop("error", None)
+            self.service.pop("warning", None)
+            self.startup_progress("config", 0, 1)
+            self.initialization_thread = threading.Thread(target=self.initialize_background,
+                                                          name="desktop-startup", daemon=True)
+            self.initialization_thread.start()
+        return self.state()
+
+    def initialize_background(self):
+        try:
+            with self.action_lock:
+                self.initialize()
+                if self.closed.is_set():
+                    return
+                self.startup_progress("service", 0, 1)
+                service = self.configure_service(**self.service_config)
+                if service["status"] == "error":
+                    self.startup_failed(service.get("error", "图库服务启动失败"))
+        except Exception as error:
+            if not self.closed.is_set():
+                traceback.print_exc(file=sys.stderr)
+                self.startup_failed(error)
 
     def shutdown(self):
         with self.lock:
@@ -1483,7 +1713,10 @@ class LibraryController:
             if source["status"] == "processing":
                 source["status"] = "queued"
         self.service.update(status="stopped", localUrl=None, lanUrls=[])
-        self.persist()
+        self.runtime.update(ready=False, status="stopped")
+        self.startup.update(status="stopped")
+        if self.initialized:
+            self.persist()
         self.owner.close()
         self.instance_lock.close()
         return {"stopped": True}
@@ -1505,11 +1738,13 @@ def main():
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stdin.reconfigure(encoding="utf-8")
+        sys.stderr.reconfigure(encoding="utf-8")
     output_lock = threading.Lock()
     def emit(value):
         with output_lock:
             print(json.dumps(value, ensure_ascii=False, allow_nan=False), flush=True)
-    controller = LibraryController(args.data, args.resources, args.node, args.instance, emit, own_process=True)
+    controller = LibraryController(args.data, args.resources, args.node, args.instance, emit, own_process=True,
+                                   defer_initialization=True)
     try:
         controller.start()
         for line in sys.stdin:

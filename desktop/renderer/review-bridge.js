@@ -36,7 +36,9 @@ window.birdshotDesktop?.onReviewProgress?.(progress => {
   if (origin) reviewFrame.contentWindow.postMessage({ type: 'birdshot-review-trash-progress', ...progress }, origin)
 })
 let latestView
-window.birdshotDesktop?.onState?.(state => {
+window.addEventListener('birdshot-state', event => {
+  const state = event.detail
+  if (!state) return
   if (state.viewRevision === latestView) return
   latestView = state.viewRevision
   const origin = reviewOrigin()

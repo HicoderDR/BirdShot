@@ -12,7 +12,7 @@ import json
 import math
 import mimetypes
 import os
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import re
 import shutil
 import socket
@@ -23,11 +23,8 @@ import time
 from urllib.parse import parse_qs, quote, unquote, urlparse
 import uuid
 
-import cv2
-import numpy as np
 from PIL import Image
 
-from batch_inference import NativeDetector, INFERENCE_VERSION, ROOT
 from preview_cache import PreviewCache, not_modified
 from review_store import read_snapshot
 from species_reference import SpeciesReferences, ReferenceError
@@ -37,6 +34,15 @@ POLICY_VERSION = "strict-crop-only-v1"
 SUPPORTED = {".jpg", ".jpeg", ".png"}
 RAW = {".arw", ".dng", ".nef", ".cr2", ".cr3", ".orf", ".raf", ".rw2"}
 PHOTO_FORMATS = SUPPORTED | RAW | {".tif", ".tiff", ".heic", ".heif", ".webp", ".bmp"}
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def __getattr__(name):
+    if name == "NativeDetector":
+        from batch_inference import NativeDetector
+        globals()[name] = NativeDetector
+        return NativeDetector
+    raise AttributeError(name)
 
 
 def report_access_allowed(client_ip, host, origin, port, hosts, network=None, allow_all=False, write=False):
@@ -85,6 +91,7 @@ def read_json(path):
 
 
 def versions():
+    from batch_inference import INFERENCE_VERSION
     paths = [ROOT / "scripts" / "batch_inference.py", ROOT / "scripts" / "batch-policy.mjs",
              ROOT / "src" / "culling" / "scoring.ts", ROOT / "src" / "lib" / "tracker.ts"]
     models = ROOT / "public" / "culling" / "models"
@@ -210,6 +217,7 @@ def initialize(source, output=None, exclude_paths=None, snapshot=None):
 
 
 def write_image(path, image, quality=95):
+    import cv2
     ok, encoded = cv2.imencode(".jpg", image, [cv2.IMWRITE_JPEG_QUALITY, quality])
     if not ok:
         raise RuntimeError("裁剪图编码失败")
@@ -225,6 +233,7 @@ def write_image(path, image, quality=95):
 
 
 def create_crops(job, image, frame, photo, source_hash):
+    import cv2
     height, width = image.shape[:2]
     records = []
     for bird in frame["instances"]:
@@ -335,6 +344,8 @@ def recover_completed(job, manifest, state, skip_source_groups=None):
 
 
 def run(job, node, threads=4, on_detected=None, on_group=None, on_progress=None, skip_groups=None):
+    import cv2
+    import numpy as np
     manifest, state = read_json(job / "manifest.json"), read_json(job / "status.json")
     if manifest["versions"] != versions():
         raise RuntimeError("模型或策略版本已变化，不能混用旧任务缓存")
@@ -401,7 +412,7 @@ def run(job, node, threads=4, on_detected=None, on_group=None, on_progress=None,
                         if detector is None:
                             if on_progress:
                                 on_progress("models", "载入YOLO分割与姿态CPU模型", group, state)
-                            detector = NativeDetector(threads)
+                            detector = getattr(sys.modules[__name__], "NativeDetector")(threads)
                             if on_progress:
                                 on_progress("models_ready", "YOLO分割与姿态模型已就绪", group, state)
                         if not path.is_relative_to(source):
@@ -527,6 +538,8 @@ def serve(job, port, lan_ip=None, prefix=24, allow_all=False, allowed_hosts=None
     manifest_signature = None
     manifest_lock = threading.Lock()
     registered_media = {}
+    health = {"instanceId": instance_id, "status": "starting",
+              "startup": {"phase": "manifest", "processed": 0, "total": len(manifest.get("media", []))}}
     def refresh_manifest():
         nonlocal manifest, manifest_signature, registered_media
         path = job / "manifest.json"
@@ -535,20 +548,33 @@ def serve(job, port, lan_ip=None, prefix=24, allow_all=False, allowed_hosts=None
             if signature == manifest_signature:
                 return
             updated = read_json(path)
-            roots = {Path(root).resolve() for root in updated.get("sourceRoots", [source])}
+            resolved_roots = {}
+            def resolve_root(root):
+                key = str(root)
+                if key not in resolved_roots:
+                    resolved_roots[key] = Path(root).resolve()
+                return resolved_roots[key]
+            roots = {resolve_root(root) for root in updated.get("sourceRoots", [source])}
             if any(previews.root.is_relative_to(root) for root in roots):
                 raise ValueError("Preview cache overlaps a registered original directory")
-            media_roots = {Path(root).resolve() for root in updated.get("mediaRoots", [])}
+            media_roots = {resolve_root(root) for root in updated.get("mediaRoots", [])}
             media = {}
-            for record in updated.get("media", []):
-                root, relative = Path(record["root"]).resolve(), Path(record["relative"])
-                candidate = (root / relative).resolve()
-                if root in media_roots and not relative.is_absolute() and ".." not in relative.parts and candidate.is_relative_to(root):
-                    media[record["path"]] = candidate
+            for index, record in enumerate(updated.get("media", [])):
+                root, relative = resolve_root(record["root"]), Path(record["relative"])
+                windows = PureWindowsPath(record["relative"])
+                if root not in media_roots or relative.is_absolute() or windows.anchor or \
+                        ".." in relative.parts or ".." in windows.parts or "\x00" in str(relative):
+                    raise ValueError("Registered media contains an escaping or unregistered path")
+                # Resolve the individual file again on every request, not 11,000 times before listening.
+                media[record["path"]] = (root / relative, root)
+                if health["status"] == "starting":
+                    health["startup"] = {"phase": "media", "processed": index + 1,
+                                         "total": len(updated.get("media", []))}
+            if signature != (path.stat().st_mtime_ns, path.stat().st_size):
+                raise ValueError("Registered manifest changed during startup validation")
             previews.photos = {photo["id"]: photo for photo in updated["photos"]}
             previews.source_roots = roots
             manifest, manifest_signature, registered_media = updated, signature, media
-    refresh_manifest()
     gallery_revision = job / "revisions" / "verified-birds-birder-v2"
     species_references = SpeciesReferences(job, [])
     species_index_signature = None
@@ -597,7 +623,6 @@ def serve(job, port, lan_ip=None, prefix=24, allow_all=False, allowed_hosts=None
             if record.get("selectedPath"):
                 registered.add(record["selectedPath"])
         allowed_media, media_mapping_signature = registered, signature
-    refresh_registered_media()
     compressed_cache = {}
     class Handler(BaseHTTPRequestHandler):
         def end_headers(self):
@@ -704,13 +729,16 @@ def serve(job, port, lan_ip=None, prefix=24, allow_all=False, allowed_hosts=None
                 self.write_report(data)
                 return
             if route == "/health.json":
-                data = json.dumps({"instanceId": instance_id, "status": "ready"}).encode("utf-8")
+                data = json.dumps(health).encode("utf-8")
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json; charset=utf-8")
                 self.send_header("Content-Length", str(len(data)))
                 self.send_header("Cache-Control", "no-store")
                 self.end_headers()
                 self.write_report(data)
+                return
+            if health["status"] != "ready":
+                self.send_error(503, "Report initialization is not complete")
                 return
             if route == "/review.json":
                 try:
@@ -846,9 +874,9 @@ def serve(job, port, lan_ip=None, prefix=24, allow_all=False, allowed_hosts=None
                 relative = route[len("/media/"):]
                 candidate = (job / relative).resolve()
                 if relative in registered_media:
-                    candidate = registered_media[relative]
-                    record = next(row for row in manifest["media"] if row["path"] == relative)
-                    if not candidate.resolve().is_relative_to(Path(record["root"]).resolve()):
+                    registered, root = registered_media[relative]
+                    candidate = registered.resolve()
+                    if root.resolve() != root or not candidate.is_relative_to(root):
                         self.send_error(403)
                         return
                     if candidate.suffix.lower() in {".jpg", ".jpeg", ".png"}:
@@ -908,8 +936,17 @@ def serve(job, port, lan_ip=None, prefix=24, allow_all=False, allowed_hosts=None
         raise
     if allow_all:
         print("REPORT_LISTEN 0.0.0.0; all source IPv4 clients may read registered private photos/originals; no authentication", flush=True)
-    for address in ["127.0.0.1"] + ([lan_ip] if lan_ip else []):
-        print(f"REPORT_READY http://{address}:{port}/", flush=True)
+    def initialize_report():
+        try:
+            refresh_manifest()
+            refresh_registered_media()
+            health.update(status="ready", startup={"phase": "ready", "processed": 1, "total": 1})
+            for address in ["127.0.0.1"] + ([lan_ip] if lan_ip else []):
+                print(f"REPORT_READY http://{address}:{port}/", flush=True)
+        except Exception as error:
+            health.update(status="error", error=str(error))
+            print("Report initialization failed: " + str(error), file=sys.stderr, flush=True)
+    threading.Thread(target=initialize_report, name="report-startup", daemon=True).start()
     for server in servers[1:]:
         threading.Thread(target=server.serve_forever, daemon=True).start()
     try:

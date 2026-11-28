@@ -2,7 +2,7 @@
   "name": "birdshot",
   "private": true,
   "version": "0.0.0",
-  "desktopVersion": "0.4.0",
+  "desktopVersion": "0.4.1",
   "type": "module",
   "scripts": {
     "dev": "vite",

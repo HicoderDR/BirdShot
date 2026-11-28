@@ -92,9 +92,10 @@ def _relative(value):
     return path
 
 
-def _registered_file(photo, record, manifest):
-    roots = manifest.get("sourceRoots", [manifest.get("source")])
-    roots = {os.path.normcase(os.path.abspath(root)) for root in roots if root}
+def _registered_file(photo, record, manifest, roots=None):
+    if roots is None:
+        roots = manifest.get("sourceRoots", [manifest.get("source")])
+        roots = {os.path.normcase(os.path.abspath(root)) for root in roots if root}
     root = Path(record.get("root") or photo.get("sourceRoot") or manifest["source"]).absolute()
     if os.path.normcase(str(root)) not in roots:
         raise ValueError("Original root is not explicitly registered")
@@ -110,7 +111,7 @@ def _registered_file(photo, record, manifest):
     return root, candidate
 
 
-def _secure_stat(root, path):
+def _secure_stat(root, path, directories=None):
     root, path = Path(root).absolute(), Path(path).absolute()
     relative = path.relative_to(root)
     if not relative.parts:
@@ -118,10 +119,14 @@ def _secure_stat(root, path):
     # Reject reparse points at every level, including registered root ancestors.
     for component in [*reversed(root.parents), root] + [root / Path(*relative.parts[:i])
                                                         for i in range(1, len(relative.parts) + 1)]:
+        if directories is not None and component != path and component in directories:
+            continue
         info = component.lstat()
         if stat.S_ISLNK(info.st_mode) or getattr(info, "st_file_attributes", 0) & 0x400:
             raise ValueError("Original path contains a symlink or junction")
-    info = path.lstat()
+        if directories is not None and component != path:
+            directories[component] = (info.st_dev, info.st_ino, info.st_mode,
+                                      getattr(info, "st_file_attributes", 0))
     if not stat.S_ISREG(info.st_mode) or not path.resolve(strict=True).is_relative_to(root.resolve(strict=True)):
         raise ValueError("Original is not a regular file inside its registered root")
     return info
@@ -153,7 +158,7 @@ def _file_hash(root, path, record, expected_hash=None):
     return {"size": before.st_size, "mtimeNs": str(before.st_mtime_ns), "sha256": sha}
 
 
-def _registry(library):
+def _registry(library, progress=None):
     library = Path(library)
     manifest = _read(library / "manifest.json")
     if not isinstance(manifest.get("photos"), list) or not isinstance(manifest.get("groups"), list):
@@ -164,7 +169,9 @@ def _registry(library):
     mapping_path = library / "mapping.json"
     mapping = _read(mapping_path).get("crops", []) if mapping_path.exists() else []
     fingerprints = {row["photoId"]: row["sourceSha256"] for row in mapping if row.get("sourceSha256")}
-    for group in manifest["groups"]:
+    report = progress or (lambda *args: None)
+    for index, group in enumerate(manifest["groups"]):
+        report("review-groups", index, len(manifest["groups"]))
         if not isinstance(group.get("id"), str) or not re.fullmatch(r"[A-Za-z0-9_-]+", group["id"]):
             raise ValueError("Invalid review group ID")
         for folder in (library / REVISION / "groups", library / "groups"):
@@ -187,11 +194,15 @@ def _registry(library):
     for item in gallery.get("items", []):
         items.setdefault(item.get("frameId"), []).append(item)
     frames = {}
-    for photo in manifest["photos"]:
+    registered_roots = {os.path.normcase(os.path.abspath(root))
+                        for root in manifest.get("sourceRoots", [manifest.get("source")]) if root}
+    directories = {}
+    for index, photo in enumerate(manifest["photos"]):
+        report("review-photos", index, len(manifest["photos"]))
         frame_id = photo["id"]
         row = enhanced.get(frame_id, {})
         capture = row.get("capture") or photo.get("capture") or metadata.get(frame_id, {}).get("capture") or {}
-        root, path = _registered_file(photo, photo["primary"], manifest)
+        root, path = _registered_file(photo, photo["primary"], manifest, registered_roots)
         size = photo.get("encodedSize") or [None, None]
         width, height = row.get("width"), row.get("height")
         if not width or not height:
@@ -205,7 +216,7 @@ def _registry(library):
                 issue.get("kind") == "history-tail" and issue.get("groupId") == row.get("group"))
             for issue in gallery.get("sourceIssues", []))
         try:
-            info = _secure_stat(root, path)
+            info = _secure_stat(root, path, directories)
             available = not issue and (info.st_size, info.st_mtime_ns) == \
                 (photo["primary"].get("size"), int(photo["primary"].get("mtimeNs", -1)))
         except (OSError, ValueError, TypeError):
@@ -220,6 +231,13 @@ def _registry(library):
                              item.get("birdVerification", {}).get("status") == "bird" for item in frame_items),
             "items": frame_items,
         }
+    # Batch-only ancestor memoization; mutations still perform full fresh stat/hash checks.
+    for directory, expected in directories.items():
+        info = directory.lstat()
+        actual = (info.st_dev, info.st_ino, info.st_mode, getattr(info, "st_file_attributes", 0))
+        if actual != expected or stat.S_ISLNK(info.st_mode) or actual[3] & 0x400:
+            raise ValueError("Original directory changed during review initialization")
+    report("review-photos", len(manifest["photos"]), len(manifest["photos"]))
     groups = []
     seen = set()
     for group in manifest["groups"]:
@@ -335,12 +353,12 @@ class ReviewStore:
                                                                       "kind": previous["kind"]}
             self.recovery = {row["identity"] for row in prepared.values()}
 
-    def refresh(self, busy_sources=None):
+    def refresh(self, busy_sources=None, progress=None):
         with self.lock:
             if busy_sources is not None:
                 self.busy_sources = set(busy_sources)
             try:
-                groups, frames, manifest, signature = _registry(self.library)
+                groups, frames, manifest, signature = _registry(self.library, progress=progress)
             except (OSError, ValueError, KeyError, TypeError) as error:
                 self.registry_error = str(error)
                 if not self.signature:

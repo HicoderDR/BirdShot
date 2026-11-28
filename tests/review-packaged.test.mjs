@@ -67,6 +67,15 @@ async function launch() {
   app = await _electron.launch({ executablePath: path.join(directory, 'BirdShot.exe'), env, timeout: 90000 })
   const page = await app.firstWindow()
   await page.waitForFunction(() => !!window.birdshotDesktop)
+  const deadline = Date.now() + 180000
+  let state
+  do {
+    state = await page.evaluate(() => window.birdshotDesktop.getState())
+    if (state.startup?.status === 'error') throw new Error(JSON.stringify(state.startup))
+    if (state.runtime.ready && state.service.status === 'ready') break
+    await page.waitForTimeout(500)
+  } while (Date.now() < deadline)
+  assert.equal(state.service.status, 'ready')
   return page
 }
 async function closeApp() {

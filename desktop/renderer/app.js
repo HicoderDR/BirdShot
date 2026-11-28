@@ -218,7 +218,19 @@ function render(next) {
   const previous = current
   const previousFrameUrl = frameUrl
   current = next
-  $('runtime-status').textContent = next.runtime.ready ? '本地运行环境已就绪' : '本地运行环境尚未就绪；请检查模型与运行环境'
+  const startup = next.startup
+  const startupPhases = { config: '读取配置', sources: '检查照片来源', models: '校验本地模型',
+    'review-state': '读取审阅状态', library: '读取已有批次', 'library-groups': '整理连拍组',
+    'library-publish': '发布已有图库', review: '建立审阅索引', 'review-groups': '检查审阅连拍组',
+    'review-photos': '检查原片关联', 'review-publish': '发布审阅索引', service: '启动本机图库服务',
+    ready: '启动完成' }
+  $('startup-status').textContent = startup ? [startupPhases[startup.phase] || startup.phase, startup.message, startup.warning, startup.error,
+    Number.isInteger(startup.processed) && Number.isInteger(startup.total) ? `${startup.processed} / ${startup.total}` : ''].filter(Boolean).join(' · ') : ''
+  $('startup-status').hidden = !startup || startup.status === 'ready'
+  $('startup-status').setAttribute('role', startup?.status === 'error' ? 'alert' : 'status')
+  $('retry-startup').disabled = startup?.status === 'initializing'
+  $('runtime-status').textContent = next.runtime.ready ? '本地运行环境已就绪' :
+    startup?.status === 'initializing' ? '本地运行环境正在初始化，可查看阶段或刷新状态' : '本地运行环境尚未就绪；请查看具体错误与日志'
   $('output-root').textContent = next.outputRoot || '尚未选择输出目录；请使用系统选择器设置。'
   $('model-list').replaceChildren()
   for (const model of next.runtime.models || []) {
@@ -227,6 +239,7 @@ function render(next) {
   if (!$('model-list').childElementCount) $('model-list').append(node('li', '尚无模型状态；本地处理前需准备运行环境。'))
   renderSources(next.sources)
   renderService(next.service)
+  window.dispatchEvent(new CustomEvent('birdshot-state', { detail: next }))
   if (previous && frameUrl === previousFrameUrl &&
       (previous.viewRevision !== next.viewRevision || gallerySourcesChanged(previous.sources, next.sources) ||
        next.sources.some(source => source.progress?.publishedRevision !== previous.sources.find(old => old.id === source.id)?.progress?.publishedRevision))) refreshGalleryIndex()
@@ -257,6 +270,7 @@ $('choose-source').addEventListener('click', () => action('chooseSource'))
 $('attach-existing').addEventListener('click', () => action('attachExisting'))
 $('choose-output').addEventListener('click', () => action('chooseOutput'))
 $('refresh-state').addEventListener('click', () => action('getState'))
+$('retry-startup').addEventListener('click', () => action('retryStartup'))
 $('service-form').addEventListener('submit', event => { event.preventDefault(); configure(Number($('service-port').value)) })
 $('apply-suggested-port').addEventListener('click', () => {
   if (current?.service.suggestedPort) {
