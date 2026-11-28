@@ -89,6 +89,76 @@ class ReviewStoreTests(unittest.TestCase):
         self.decide(store, frame_id, True)
         return self.decide(store, frame_id, False)
 
+    def draft_batch(self, store, selected=True):
+        snapshot = store.snapshot()
+        return [{"groupId": group["id"], "groupRevision": group["revision"], "changes": [
+            {"frameId": frame["id"], "identity": frame["identity"], "selected": selected, "manual": True,
+             "baseSelected": frame["selected"], "baseManual": frame["manual"]} for frame in group["frames"]]}
+            for group in snapshot["groups"]]
+
+    def test_explicit_batch_save_never_rescans_originals_and_restarts(self):
+        self.photo("a.jpg", group="g00001")
+        self.photo("b.jpg", group="g00002")
+        store = self.store()
+        before = {file.name: hashlib.sha256(file.read_bytes()).hexdigest() for file in self.source.iterdir()}
+        batch = self.draft_batch(store)
+        with patch("review_store._registry", side_effect=AssertionError("No full registry on explicit save")), \
+                patch("review_store._secure_stat", side_effect=AssertionError("No source scan on save")), \
+                patch("review_store._file_hash", side_effect=AssertionError("No original hash on save")):
+            result = store.save(store.snapshot()["revision"], batch)
+        self.assertEqual(result["summary"]["selectedCount"], 2)
+        self.assertTrue(all(group["manualReviewed"] for group in result["groups"]))
+        self.assertFalse(store.audit_path.exists())
+        restarted = ReviewStore(self.root / "data", self.library)
+        self.assertEqual(restarted.refresh(), result)
+        self.assertEqual(before, {file.name: hashlib.sha256(file.read_bytes()).hexdigest() for file in self.source.iterdir()})
+
+    def test_batch_failure_is_atomic_and_conflict_does_not_overwrite(self):
+        self.photo("a.jpg")
+        store = self.store()
+        before = store.snapshot()
+        bad = self.draft_batch(store)
+        bad[0]["changes"][0]["identity"] = "f" * 64
+        with self.assertRaisesRegex(ValueError, "identities"):
+            store.save(before["revision"], bad)
+        self.assertEqual(store.snapshot(), before)
+        with patch("review_store._atomic", side_effect=OSError("controlled disk full")):
+            with self.assertRaisesRegex(OSError, "disk full"):
+                store.save(before["revision"], self.draft_batch(store))
+        self.assertEqual(store.snapshot(), before)
+        self.assertFalse(store.path.exists())
+        store.save(before["revision"], self.draft_batch(store))
+        with self.assertRaisesRegex(ValueError, "conflict"):
+            store.save(before["revision"], self.draft_batch(store, False))
+        self.assertTrue(store.snapshot()["groups"][0]["frames"][0]["selected"])
+
+    def test_registry_cache_skips_full_registry_but_checks_sources_before_write(self):
+        self.photo("a.jpg")
+        store = self.store()
+        store.cache_registry("known-input")
+        restarted = ReviewStore(self.root / "data", self.library)
+        with patch("review_store._registry", side_effect=AssertionError("Cached view must not rebuild groups")):
+            self.assertTrue(restarted.restore_registry("known-input"))
+            restarted.validate_cached_sources()
+        self.assertEqual(restarted.snapshot(), store.snapshot())
+        self.assertFalse(restarted.restore_registry("changed-input"))
+        damaged = _read(store.cache_path)
+        damaged["frames"]["p000001"]["width"] += 1
+        _atomic(store.cache_path, damaged)
+        with self.assertRaisesRegex(ValueError, "checksum mismatch"):
+            restarted.restore_registry("known-input")
+        (self.source / "a.jpg").write_bytes(b"changed source")
+        restarted.validate_cached_sources()
+        self.assertFalse(restarted.snapshot()["groups"][0]["frames"][0]["available"])
+        with self.assertRaisesRegex(ValueError, "Original changed"):
+            restarted.save(restarted.snapshot()["revision"], self.draft_batch(restarted))
+        original_state = store.path.read_bytes() if store.path.exists() else None
+        _atomic(store.cache_path, {"version": 99})
+        with self.assertRaisesRegex(ValueError, "cache schema"):
+            restarted.restore_registry("known-input")
+        self.assertEqual(_read(store.cache_path), {"version": 99})
+        self.assertEqual(store.path.read_bytes() if store.path.exists() else None, original_state)
+
     def test_decisions_are_identity_based_across_reorder_ids_and_same_basename(self):
         self.photo("north/same.jpg", keep=True)
         self.photo("south/same.jpg", keep=False)

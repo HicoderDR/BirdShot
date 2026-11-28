@@ -26,6 +26,26 @@ export function reviewRequest(action, value = {}) {
         [value.includeRaw, value.includeZero].some(flag => flag !== undefined && typeof flag !== 'boolean')) throw new Error('清理范围无效')
     return { expectedRevision: value.expectedRevision, includeRaw: value.includeRaw === true, includeZero: value.includeZero === true }
   }
+  if (action === 'save') {
+    if (Object.keys(value).some(key => !['expectedRevision', 'groups'].includes(key)) ||
+        !Array.isArray(value.groups) || !value.groups.length || value.groups.length > 2000 ||
+        value.groups.reduce((count, group) => count + (group?.changes?.length || 0), 0) > 20000) throw new Error('遴选保存批次无效')
+    const groups = new Set(), photos = new Set()
+    for (const group of value.groups) {
+      if (!group || Object.keys(group).length !== 3 || Object.keys(group).some(key => !['groupId', 'groupRevision', 'changes'].includes(key)) ||
+          !/^g(?:\d{5}|[a-f0-9]{24})$/.test(group.groupId || '') || !/^[a-f0-9]{64}$/.test(group.groupRevision || '') ||
+          groups.has(group.groupId) || !Array.isArray(group.changes)) throw new Error('遴选连拍组无效')
+      groups.add(group.groupId)
+      for (const row of group.changes) {
+        if (!row || Object.keys(row).length !== 6 ||
+            Object.keys(row).some(key => !['frameId', 'identity', 'selected', 'manual', 'baseSelected', 'baseManual'].includes(key)) ||
+            !/^p(?:\d{6}|[a-f0-9]{24})$/.test(row.frameId || '') || !/^[a-f0-9]{64}$/.test(row.identity || '') ||
+            photos.has(row.identity) || ['selected', 'manual', 'baseSelected', 'baseManual'].some(key => typeof row[key] !== 'boolean')) throw new Error('遴选照片状态无效')
+        photos.add(row.identity)
+      }
+    }
+    return value
+  }
   if (action !== 'decide' || Object.keys(value).some(key => !['expectedRevision', 'groupId', 'changes', 'action'].includes(key)) ||
       !/^g(?:\d{5}|[a-f0-9]{24})$/.test(value.groupId || '') ||
       !['set', 'restoreAutomatic', 'undo'].includes(value.action || 'set')) throw new Error('审阅操作无效')
@@ -75,7 +95,7 @@ export async function validateTrashFile(record) {
 export function createReviewNative({ command, confirm, trashItem, progress, busy }) {
   const plans = new Map()
   let running = null
-  const actions = { state: 'review_state', decide: 'review_decide', preferences: 'review_preferences',
+  const actions = { state: 'review_state', decide: 'review_decide', save: 'review_save', preferences: 'review_preferences',
     cleanupPreview: 'review_cleanup_preview', cleanupCancel: 'review_cleanup_cancel' }
   const invoke = async (action, input) => {
     const params = reviewRequest(action, input)
@@ -85,7 +105,7 @@ export function createReviewNative({ command, confirm, trashItem, progress, busy
       return command(actions[action], params)
     }
     if (action !== 'cleanupExecute') {
-      if (running && ['decide', 'preferences', 'cleanupPreview'].includes(action)) throw new Error('正在回收，请先完成或取消')
+      if (running && ['save', 'decide', 'preferences', 'cleanupPreview'].includes(action)) throw new Error('正在回收，请先完成或取消')
       const result = await command(actions[action], params)
       if (action === 'cleanupPreview') {
         plans.clear()

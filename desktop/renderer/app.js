@@ -8,6 +8,7 @@ const labels = {
   processing: '处理中', running: '运行中', ready: '已就绪', completed: '已完成',
   error: '出错', failed: '失败', missing: '目录不可用', paused: '已暂停',
   starting: '启动中', stopped: '未启动', unavailable: '不可用',
+  cached: '上次内容已缓存，正在校验更新',
 }
 let current = null
 let busy = false
@@ -154,7 +155,7 @@ function renderService(service) {
   $('apply-suggested-port').hidden = !Number.isInteger(suggestion) || suggestion < 1024 || suggestion > 65535
   $('apply-suggested-port').textContent = '端口冲突？应用建议端口 ' + suggestion
   $('service-addresses').replaceChildren()
-  const ready = ['ready', 'running'].includes(service.status)
+  const ready = ['cached', 'ready', 'running'].includes(service.status)
   if (ready) {
     if (service.localUrl) $('service-addresses').append(node('p', '本机：' + service.localUrl))
     if (service.mode !== 'local') for (const url of service.lanUrls || []) $('service-addresses').append(node('p', '共享：' + url))
@@ -180,9 +181,11 @@ function renderService(service) {
       }
     }
   } else {
-    frameUrl = ''
-    $('gallery-frame').removeAttribute('src')
-    $('gallery-frame').hidden = true
+    if (!frameUrl || ready && !url) {
+      frameUrl = ''
+      $('gallery-frame').removeAttribute('src')
+      $('gallery-frame').hidden = true
+    }
     if (ready) message('图库地址无效', '主进程未提供合法的 127.0.0.1 本机图库地址；未打开其他地址。', true)
     else if (service.error) message('本机服务未能就绪', service.error + '。请展开网络服务设置；若端口被占用，可明确应用建议端口。', true)
     else if (!current.sources.length) message('欢迎使用 BirdShot', '添加来源目录或接入旧批次。图库需要本机服务就绪后显示，可在网络服务设置中启动。')
@@ -219,7 +222,7 @@ function render(next) {
   const previousFrameUrl = frameUrl
   current = next
   const startup = next.startup
-  const startupPhases = { config: '读取配置', sources: '检查照片来源', models: '校验本地模型',
+  const startupPhases = { config: '读取配置', cache: '读取已缓存内容', sources: '检查照片来源', models: '校验本地模型',
     'review-state': '读取审阅状态', library: '读取已有批次', 'library-groups': '整理连拍组',
     'library-publish': '发布已有图库', review: '建立审阅索引', 'review-groups': '检查审阅连拍组',
     'review-photos': '检查原片关联', 'review-publish': '发布审阅索引', service: '启动本机图库服务',

@@ -3,15 +3,17 @@
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
 import { createServer } from 'node:http'
+import { createHash } from 'node:crypto'
 import { chromium } from 'playwright'
 import {
-  createNativeBridge, filteredGroups, formatCaptureTime, frameInstances, geometry, groupLabel, mediaURL, nextResolution,
+  ReviewDraft, canvasShortcut, createNativeBridge, filteredGroups, formatCaptureTime, frameInstances, geometry, groupLabel, mediaURL, nextResolution,
   probabilityLabel, shortcut, technicalSentence, topThree, validateSnapshot, zoomAt
 } from '../scripts/review.js'
 
 const candidates = Array.from({ length: 5 }, (_, index) => ({
   commonName: `合成鸟种 ${index + 1}`, scientificName: `Synthetic ${index + 1}`, probability: [.33333, .22222, .11111, .05, .01][index]
 }))
+const identity = id => createHash('sha256').update(id).digest('hex')
 const instance = (id, status = 'bird', extra = {}) => ({
   id, crop: `crops/synthetic bird ${id}.jpg`, thumbnail: `thumbs/synthetic ${id}.jpg`,
   cropRect: [100 + id * 120, 160, 220, 190], mask: { path: `M ${100 + id * 120} 160 l 220 0 l 0 190 Z` },
@@ -26,7 +28,7 @@ const frames = [
   { id: 'p000002', sourceLabel: 'synthetic-002.jpg', width: 6000, height: 4000, selected: true, automatic: true, manual: false, available: true, supported: true }
 ]
 function baseline() {
-  return { version: 1, revision: 5, preferences: { exitAction: 'ask' }, groups: [
+  const result = { version: 1, revision: 5, preferences: { exitAction: 'ask' }, groups: [
     { id: 'g00002', revision: 'synthetic-a', name: '原始第一组', frames: structuredClone(frames), manualReviewed: false, newFramesPending: 0,
       selectedCount: 2, automaticCount: 2, cover: { crop: 'crops/synthetic bird 0.jpg', frameId: 'p000003' } },
     { id: 'g00001', revision: 'synthetic-b', name: '无鸟第二组', frames: [
@@ -37,6 +39,11 @@ function baseline() {
       { ...frames[0], id: 'p' + 'b'.repeat(24), sourceLabel: 'synthetic-stable.jpg' }
     ], manualReviewed: false, newFramesPending: 1, selectedCount: 1, automaticCount: 1, cover: { crop: null, frameId: null } }
   ], summary: {} }
+  for (const group of result.groups) {
+    group.revision = identity(group.revision)
+    for (const frame of group.frames) frame.identity = identity(frame.id)
+  }
+  return result
 }
 function detail(id) {
   const entry = snapshot.groups.find(group => group.id === id)
@@ -95,6 +102,29 @@ for (const ignored of [{ repeat: true }, { isComposing: true }, { ctrlKey: true 
   assert.equal(shortcut({ key: 'd', ...ignored }), null)
 }
 assert.equal(shortcut({ key: 'A' }), 'previousFrame')
+for (const event of [{ key: '+', ctrlKey: true }, { key: '=', ctrlKey: true }, { code: 'NumpadAdd', ctrlKey: true }]) {
+  assert.equal(canvasShortcut(event), 'zoomIn')
+}
+assert.equal(canvasShortcut({ key: '-', ctrlKey: true }), 'zoomOut')
+assert.equal(canvasShortcut({ code: 'NumpadSubtract', ctrlKey: true }), 'zoomOut')
+assert.equal(canvasShortcut({ key: 'ArrowRight' }), 'right')
+assert.equal(canvasShortcut({ key: 'ArrowRight', isComposing: true }), null)
+assert.equal(canvasShortcut({ key: 'ArrowRight', target: { closest: () => ({}) } }), null)
+const draft = new ReviewDraft()
+draft.accept(baseline()); draft.edit('g00002', [{ frameId: 'p000003', selected: false }])
+const draftSent = draft.capture(), saved = baseline()
+saved.revision++; saved.groups[0].frames[0].selected = false; saved.groups[0].frames[0].manual = true
+draft.edit('g00002', [{ frameId: 'p000003', selected: true }])
+draft.acknowledge(saved, draftSent)
+assert.equal(draft.working.groups[0].frames[0].selected, true, 'edits made during a save survive its response')
+assert.equal(draft.conflicts, 0); assert.equal(draft.dirty, true)
+const conflicting = structuredClone(saved)
+conflicting.revision++; conflicting.groups[0].frames[0].manual = false
+draft.accept(conflicting)
+assert.ok(draft.conflicts > 0); assert.throws(() => draft.batch(), /冲突/)
+assert.equal(draft.working.groups[0].frames[0].selected, true)
+draft.edit('g00002', [{ frameId: 'p000003', selected: true }])
+assert.equal(draft.conflicts, 0, 'explicitly choosing the conflicted frame revalidates its baseline')
 
 // A file/null-origin parent is a prerequisite; self, siblings and web parents cannot grant write access.
 function fakeWindow(embedded = true) {
@@ -126,7 +156,7 @@ assert.equal(readonly.writable, false); readonly.dispose()
 const assets = new Map(await Promise.all(['review-report.html', 'review.js', 'review.css'].map(async name =>
   [name, await readFile(new URL('../scripts/' + name, import.meta.url))])))
 const requests = [], operations = [], modes = []
-let failSave = false, decodeDelay = 0, originalWrong = false, cleanupOptions
+let failSave = false, saveDelay = 0, decodeDelay = 0, originalWrong = false, cleanupOptions
 function svg(width, height) {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}"><rect width="100%" height="100%" fill="#123854"/><text x="15" y="35" fill="#b7d7ff" font-size="22">SYNTHETIC ONLY</text></svg>`
 }
@@ -217,7 +247,7 @@ try {
   const currentView = await refreshPage.locator('#source-layer').evaluate(node => ({
     scale: node.dataset.scale, cx: node.dataset.centerX, cy: node.dataset.centerY, transform: node.style.transform
   }))
-  await refreshPage.locator('#exit').click()
+  await refreshPage.locator('#exit-dialog').evaluate(dialog => dialog.showModal())
   assert.equal(await refreshPage.locator('#exit-dialog').evaluate(node => node.open), true)
   snapshot = { ...baseline(), revision: 2 }
   await notifyRefresh('file://')
@@ -302,32 +332,36 @@ try {
     node.dispatchEvent(new KeyboardEvent('keydown', { key: 'd', isComposing: true, bubbles: true }))
   })
   assert.match(await page.locator('#frame-title').textContent(), /^1 \/ 3/)
+  assert.equal(await page.locator('#help').isVisible(), true)
+  assert.equal(await page.locator('#help').evaluate(node => getComputedStyle(node).position), 'static')
   await page.locator('#exit').click()
-  assert.equal(await page.locator('#exit-dialog').evaluate(node => node.open), true)
-  await page.keyboard.press('d')
-  assert.match(await page.locator('#frame-title').textContent(), /^1 \/ 3/)
-  assert.equal(await page.locator('#remember-exit').isChecked(), false)
-  await page.locator('#continue-review').click()
-  await page.locator('#exit').click(); await page.locator('#exit-only').click()
   assert.equal(await page.locator('#immersive').isHidden(), true)
 
   // Test-only embedded parent simulation. Production HTML has no test hook or HTTP write route.
-  await page.exposeFunction('__nativeRequest', message => {
+  await page.exposeFunction('__nativeRequest', async message => {
     if (message.type === 'birdshot-review-mode') { modes.push(message.immersive); return null }
     if (message.type !== 'birdshot-review-request') return null
     operations.push(structuredClone(message))
     const params = message.params
     if (message.action === 'state') return { ok: true, result: snapshot }
-    if (message.action === 'decide') {
-      if (failSave) { failSave = false; return { ok: false, error: 'revision conflict synthetic' } }
+    if (message.action === 'save') {
+      if (saveDelay) await new Promise(resolve => setTimeout(resolve, saveDelay))
+      if (failSave) { failSave = false; return { ok: false, error: 'synthetic disk full' } }
       assert.equal(params.expectedRevision, snapshot.revision)
       assert.ok(!JSON.stringify(params).includes('crops/'))
-      const group = snapshot.groups.find(group => group.id === params.groupId)
-      const changes = params.action === 'restoreAutomatic' ? group.frames.map(frame => ({ frameId: frame.id, selected: frame.automatic })) : params.changes
-      for (const change of changes) {
-        const frame = group.frames.find(frame => frame.id === change.frameId); frame.selected = change.selected; frame.manual = true
+      for (const entry of params.groups) {
+        const group = snapshot.groups.find(group => group.id === entry.groupId)
+        assert.equal(entry.groupRevision, group.revision)
+        for (const change of entry.changes) {
+          const frame = group.frames.find(frame => frame.id === change.frameId)
+          assert.equal(change.identity, frame.identity)
+          assert.equal(change.baseSelected, frame.selected)
+          assert.equal(change.baseManual, Boolean(frame.manual))
+          frame.selected = change.selected; frame.manual = change.manual
+        }
+        group.manualReviewed = true
       }
-      group.manualReviewed = true; snapshot.revision++; return { ok: true, result: snapshot }
+      snapshot.revision++; return { ok: true, result: snapshot }
     }
     if (message.action === 'preferences') {
       assert.equal(params.expectedRevision, snapshot.revision); snapshot.preferences.exitAction = params.exitAction; snapshot.revision++
@@ -364,36 +398,38 @@ try {
   await page.reload(); await ready()
   await page.waitForFunction(() => !document.querySelector('#cleanup').disabled)
   await page.locator('.group-open').first().click(); await page.locator('#stage .source-image').waitFor()
-  let decisions = () => operations.filter(operation => operation.action === 'decide')
+  const decisions = () => operations.filter(operation => operation.action === 'save')
   await page.locator('#stage').click({ position: { x: 200, y: 250 } })
   await page.keyboard.press('Space')
-  await page.waitForFunction(() => document.querySelector('#immersive-status').textContent.startsWith('已保存'))
-  assert.equal(decisions().at(-1).params.changes[0].selected, false)
-  assert.equal(snapshot.groups[0].frames[0].selected, false)
+  await page.waitForFunction(() => document.querySelector('#immersive-status').textContent.startsWith('未保存'))
+  assert.equal(decisions().length, 0)
+  assert.equal(snapshot.groups[0].frames[0].selected, true, 'Space never calls persistence or changes the backend table')
   assert.equal(await page.locator('.frame-check input').first().isChecked(), false)
-  await page.keyboard.press('w'); await page.waitForFunction(() => document.querySelector('#immersive-status').textContent.startsWith('已保存'))
-  assert.equal(decisions().at(-1).params.changes[0].selected, true)
-  await page.keyboard.press('s'); await page.waitForFunction(() => document.querySelector('#immersive-status').textContent.startsWith('已保存'))
-  assert.equal(decisions().at(-1).params.changes[0].selected, false)
+  await page.keyboard.press('w'); assert.equal(await page.locator('.frame-check input').first().isChecked(), true)
+  await page.keyboard.press('s'); assert.equal(await page.locator('.frame-check input').first().isChecked(), false)
   const count = decisions().length
   await page.locator('#stage').evaluate(node => node.dispatchEvent(new KeyboardEvent('keydown', { key: 'w', repeat: true, bubbles: true })))
   assert.equal(decisions().length, count)
+  await page.locator('#save-immersive').click()
+  await page.waitForFunction(() => document.querySelector('#immersive-status').textContent.startsWith('遴选状态已同步'))
+  assert.equal(decisions().length, 1)
+  assert.equal(snapshot.groups[0].frames[0].selected, false)
   failSave = true
   await page.keyboard.press('w')
-  await page.waitForFunction(() => document.querySelector('#immersive-status').textContent.includes('版本冲突'))
-  assert.equal(await page.locator('.frame-check input').first().isChecked(), false, 'failed save never paints a false selected state')
+  await page.locator('#save-immersive').click()
+  await page.waitForFunction(() => document.querySelector('#immersive-status').textContent.includes('保存失败'))
+  assert.equal(await page.locator('.frame-check input').first().isChecked(), true, 'failed save preserves the explicitly marked unsaved draft')
+  assert.equal(snapshot.groups[0].frames[0].selected, false)
+  await page.locator('#save-immersive').click()
+  await page.waitForFunction(() => document.querySelector('#immersive-status').textContent.startsWith('遴选状态已同步'))
   await page.locator('#multiselect').click()
   const beforeCheck = decisions().length
-  await page.locator('.frame-check input').first().check()
-  await page.waitForFunction(() => document.querySelector('#immersive-status').textContent.startsWith('已保存'))
-  assert.equal(decisions().length, beforeCheck + 1, 'checkbox toggles exactly once')
-  assert.equal(decisions().at(-1).params.changes[0].selected, true)
+  await page.locator('.frame-check input').first().uncheck()
+  assert.equal(decisions().length, beforeCheck, 'checkbox changes the same in-memory draft without IPC')
   const beforeTile = decisions().length
   await page.locator('.frame-open').nth(1).click()
-  await page.waitForFunction(() => document.querySelector('#immersive-status').textContent.startsWith('已保存'))
-  assert.equal(decisions().length, beforeTile + 1)
-  assert.equal(decisions().at(-1).params.changes[0].frameId, 'p000001')
-  assert.equal(decisions().at(-1).params.changes[0].selected, true)
+  assert.equal(decisions().length, beforeTile)
+  assert.equal(await page.locator('.frame-check input').nth(1).isChecked(), true)
   await page.locator('#multiselect').click()
   const longCount = decisions().length
   const tileBounds = await page.locator('.frame-open').nth(1).boundingBox()
@@ -402,11 +438,55 @@ try {
   await page.mouse.up()
   assert.equal(decisions().length, longCount, 'longpress enters multiselect without accidental synthesized toggle')
   await page.locator('#restore').click()
-  await page.waitForFunction(() => document.querySelector('#immersive-status').textContent.startsWith('已保存'))
-  assert.equal(decisions().at(-1).params.action, 'restoreAutomatic')
+  assert.equal(await page.locator('.frame-check input').nth(1).isChecked(), false)
   await page.locator('#undo').click()
-  await page.waitForFunction(() => document.querySelector('#immersive-status').textContent.startsWith('已保存'))
-  assert.equal(decisions().at(-1).params.action, 'undo')
+  assert.equal(await page.locator('.frame-check input').nth(1).isChecked(), true)
+  assert.equal(decisions().length, longCount, 'restore and undo are in-memory operations too')
+
+  await page.locator('#reset-zoom').click()
+  await page.keyboard.press('Control+=')
+  assert.ok(Math.abs((await normalized()).scale - 1.12) < .001, 'short press applies one zoom step')
+  await page.keyboard.down('Control'); await page.keyboard.down('=')
+  await page.waitForTimeout(450)
+  assert.ok((await normalized()).scale > 1.4)
+  await page.keyboard.up('Control')
+  const released = await normalized()
+  await page.waitForTimeout(220)
+  assert.deepEqual(await normalized(), released, 'releasing Ctrl stops held zoom')
+  await page.keyboard.up('=')
+  await page.keyboard.press('Control+-')
+  assert.ok((await normalized()).scale < released.scale)
+  await page.locator('#reset-zoom').click()
+  await page.keyboard.down('Control')
+  for (let index = 0; index < 12; index++) await page.keyboard.press('=')
+  await page.keyboard.up('Control')
+  await page.keyboard.down('ArrowRight')
+  await page.waitForTimeout(400); await page.keyboard.up('ArrowRight')
+  const panned = await normalized()
+  assert.ok(panned.cx > .5, 'right arrow looks further right in the original')
+  await page.waitForTimeout(180)
+  assert.deepEqual(await normalized(), panned)
+  await page.keyboard.down('ArrowLeft'); await page.waitForTimeout(230)
+  await page.evaluate(() => window.dispatchEvent(new Event('blur')))
+  const blurred = await normalized()
+  await page.waitForTimeout(180)
+  assert.deepEqual(await normalized(), blurred, 'blur stops continuous panning')
+  await page.keyboard.up('ArrowLeft')
+  await page.keyboard.down('ArrowRight'); await page.keyboard.press('e')
+  await page.waitForFunction(() => document.querySelector('#group-title').textContent === '无鸟第二组')
+  await page.waitForTimeout(200)
+  assert.deepEqual(await normalized(), initial, 'switching groups stops held keys and resets the view')
+  await page.keyboard.up('ArrowRight'); await page.keyboard.press('q')
+  await page.waitForFunction(() => document.querySelector('#group-title').textContent === '原始第一组')
+  saveDelay = 450
+  await page.locator('#save-immersive').click()
+  await page.keyboard.press('d'); await page.keyboard.press('Space')
+  assert.match(await page.locator('#frame-title').textContent(), /^2 \/ 3/, 'navigation is not locked by a slow explicit save')
+  await page.waitForTimeout(600)
+  assert.match(await page.locator('#immersive-status').textContent(), /^未保存/, 'new input survives the in-flight save')
+  saveDelay = 0
+  await page.locator('#save-immersive').click()
+  await page.waitForFunction(() => document.querySelector('#immersive-status').textContent.startsWith('遴选状态已同步'))
 
   // Initial low preview stays installed while a delayed higher-quality image decodes.
   await page.locator('#previous-frame').click(); await page.locator('#stage .source-image').waitFor()
@@ -417,18 +497,27 @@ try {
   assert.deepEqual(await normalized(), upgradedView, 'decode replacement keeps transform')
   decodeDelay = 0
   originalWrong = true
-  await page.keyboard.down('Control'); await page.mouse.wheel(0, -2000); await page.keyboard.up('Control')
+  await page.locator('#stage').evaluate(stage => {
+    const box = stage.getBoundingClientRect()
+    stage.dispatchEvent(new WheelEvent('wheel', { ctrlKey: true, deltaY: -2000,
+      clientX: box.x + box.width / 2, clientY: box.y + box.height / 2, bubbles: true, cancelable: true }))
+  })
   await page.waitForFunction(() => document.querySelector('#resolution-status').textContent.includes('原文件尺寸不符'), { timeout: 20000 })
   assert.ok(!(await page.locator('#resolution-status').textContent()).startsWith('原文件像素已核对'))
   originalWrong = false
 
+  await page.locator('#keep-frame').click()
   await page.locator('#exit').click()
   assert.equal(await page.locator('#exit-dialog').evaluate(node => node.open), true, JSON.stringify({
     preferences: snapshot.preferences, status: await page.locator('#immersive-status').textContent(), errors,
+    frame: await page.locator('#frame-title').textContent(),
     dialogs: await page.locator('dialog').evaluateAll(nodes => nodes.map(node => [node.id, node.open, node.getAttribute('open')]))
   }))
-  assert.equal(await page.locator('#remember-exit').isChecked(), false)
-  await page.locator('#exit-cleanup').click()
+  const cleanupReads = operations.filter(operation => operation.action === 'cleanupPreview').length
+  await page.locator('#continue-review').click()
+  await page.locator('#cleanup').evaluate(button => button.click())
+  assert.equal(operations.filter(operation => operation.action === 'cleanupPreview').length, cleanupReads, 'unsaved drafts cannot start cleanup')
+  await page.locator('#exit-save').click()
   await page.waitForFunction(() => !document.querySelector('#cleanup-execute').disabled)
   assert.equal(cleanupOptions.includeRaw, false)
   assert.equal(cleanupOptions.includeZero, false)
@@ -445,8 +534,12 @@ try {
   snapshot.preferences.exitAction = 'cleanup'
   await page.locator('#refresh').evaluate(button => button.click())
   await page.waitForFunction(() => !document.querySelector('#refresh').disabled)
-  await page.locator('#exit').click(); await page.waitForFunction(() => !document.querySelector('#cleanup-execute').disabled)
-  assert.equal(await page.locator('#cleanup-dialog').evaluate(node => node.open), true, 'cleanup preference still requires this preview')
+  await page.locator('#exit').click()
+  assert.equal(await page.locator('#immersive').isHidden(), true, 'legacy cleanup preferences never recycle on ordinary exit')
+  assert.equal(await page.locator('#cleanup-dialog').evaluate(node => node.open), false)
+  await page.locator('.group-open').first().click()
+  await page.locator('#cleanup').evaluate(button => button.click())
+  await page.waitForFunction(() => !document.querySelector('#cleanup-execute').disabled)
   assert.equal(cleanupOptions.includeZero, false)
   await page.locator('#cleanup-execute').click()
   await page.waitForFunction(() => document.querySelector('#trash-progress').textContent.includes('系统确认已取消'))
@@ -455,8 +548,7 @@ try {
   snapshot.preferences.exitAction = 'ask'
   await page.locator('#refresh').evaluate(button => button.click())
   await page.waitForFunction(() => !document.querySelector('#refresh').disabled)
-  await page.locator('#exit').click(); await page.locator('#remember-exit').check(); await page.locator('#exit-only').click()
-  assert.equal(snapshot.preferences.exitAction, 'exit')
+  await page.locator('#exit').click()
   assert.equal(await page.locator('#immersive').isHidden(), true)
   await page.locator('#reset-exit').click()
   await page.waitForFunction(() => document.querySelector('#save-status').textContent.includes('已重置'))
@@ -474,10 +566,8 @@ try {
       await page.locator('#drawer-toggle').click()
       assert.ok(await page.locator('#review-drawer').evaluate(node => node.scrollWidth <= node.clientWidth))
       await page.locator('#drawer-close').click()
-      await page.locator('#help-button').click()
       assert.equal(await page.locator('#help').isVisible(), true)
-      assert.equal(await page.locator('#help').evaluate(node => getComputedStyle(node).pointerEvents), 'none')
-      await page.locator('#help-button').click()
+      assert.equal(await page.locator('#help').evaluate(node => getComputedStyle(node).position), 'static')
       const sourceBounds = await page.locator('#stage').boundingBox()
       const touch = await page.context().newCDPSession(page)
       const firstTouch = { id: 11, x: sourceBounds.x + 80, y: sourceBounds.y + 150 }
@@ -493,7 +583,7 @@ try {
       await page.locator('#next-group').click()
       assert.equal(await page.locator('#group-title').textContent(), '无鸟第二组')
     }
-    await page.locator('#exit').click(); await page.locator('#exit-only').click()
+    await page.locator('#exit').click()
   }
   assert.ok(modes.includes(true) && modes.includes(false))
   assert.deepEqual(external, [], 'references are locally served and no private photo is loaded')

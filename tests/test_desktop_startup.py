@@ -271,6 +271,7 @@ class DesktopStartupTests(unittest.TestCase):
     def polling_controller(self):
         controller = self.controller()
         controller.model_ready = True
+        controller.library_initialized = True
         controller.server = Mock(pid=987654)
         controller.server.poll.return_value = None
         controller.owner.stop = Mock()
@@ -312,6 +313,58 @@ class DesktopStartupTests(unittest.TestCase):
             controller.poll_service()
         self.assertTrue(controller.runtime["ready"])
         self.assertEqual(controller.service["status"], "ready")
+
+    def test_cached_second_start_is_browsable_while_models_are_still_gated(self):
+        first = self.controller([self.synthetic_job(3)])
+        first.start()
+        self.wait_for(lambda: first.service["status"] == "ready")
+        data = first.data
+        first.shutdown()
+        entered, release = threading.Event(), threading.Event()
+        def runtime(progress=None):
+            entered.set()
+            release.wait(12)
+            return {"ready": True, "models": []}
+        second = LibraryController(data, self.resources, Path(sys.executable), "cached-second",
+                                   self.events.append, defer_initialization=True)
+        self.controllers.append(second)
+        try:
+            with patch.object(second, "runtime_state", side_effect=runtime), \
+                    patch.object(desktop_backend, "aggregate_library", side_effect=AssertionError("No full rebuild on cache hit")):
+                second.start()
+                self.assertTrue(entered.wait(5))
+                self.wait_for(lambda: second.service["status"] == "cached")
+                self.assertFalse(second.runtime["ready"])
+                self.assertFalse(second.initialized)
+                with OPENER.open(second.service["localUrl"] + "review.json", timeout=3) as response:
+                    self.assertEqual(json.load(response)["summary"]["frameCount"], 3)
+                with self.assertRaisesRegex(RuntimeError, "初始化"):
+                    second.dispatch("review_save", {})
+                release.set()
+                self.wait_for(lambda: second.service["status"] == "ready")
+                self.assertTrue(second.runtime["ready"])
+        finally:
+            release.set()
+
+    def test_cached_model_error_keeps_read_only_view_and_never_grants_save(self):
+        first = self.controller([self.synthetic_job(2)])
+        first.start()
+        self.wait_for(lambda: first.service["status"] == "ready")
+        first.shutdown()
+        second = LibraryController(first.data, self.resources, Path(sys.executable), "cached-bad-model",
+                                   self.events.append, defer_initialization=True)
+        self.controllers.append(second)
+        with patch.object(second, "runtime_state", return_value={"ready": False, "models": [],
+                                                                 "error": "controlled model checksum mismatch"}):
+            second.start()
+            self.wait_for(lambda: second.startup["status"] == "error")
+            self.wait_for(lambda: second.service["status"] == "cached")
+            self.assertFalse(second.runtime["ready"])
+            self.assertFalse(second.initialized)
+            with OPENER.open(second.service["localUrl"] + "review.json", timeout=3) as response:
+                self.assertTrue(json.load(response)["cached"])
+            with self.assertRaisesRegex(RuntimeError, "初始化"):
+                second.dispatch("review_save", {})
 
     def test_future_config_is_never_overwritten(self):
         data = self.root / "future-data"

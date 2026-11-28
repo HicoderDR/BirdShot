@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron'
+import { app, BrowserWindow, dialog, ipcMain, shell, Menu } from 'electron'
 import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
 import { randomUUID } from 'node:crypto'
@@ -16,6 +16,17 @@ const here = path.dirname(fileURLToPath(import.meta.url))
 const page = path.join(here, 'renderer', 'index.html')
 const pageUrl = pathToFileURL(page).href
 let window, backend, closing = false, sequence = 0, startupTimer
+let closeReviewRequest
+let reviewMode = false, previousPageZoom = 1
+function configureMenu() {
+  Menu.setApplicationMenu(Menu.buildFromTemplate([
+    { role: 'fileMenu' }, { role: 'editMenu' },
+    { label: '视图', submenu: [{ role: 'reload' }, { role: 'forceReload' }, { role: 'toggleDevTools' },
+      { type: 'separator' }, ...(reviewMode ? [{ label: '图片缩放：Ctrl +/-', enabled: false }] :
+        [{ role: 'resetZoom' }, { role: 'zoomIn' }, { role: 'zoomOut' }]), { role: 'togglefullscreen' }] },
+    { role: 'windowMenu' },
+  ]))
+}
 const pending = new Map()
 const instanceId = randomUUID()
 const startup = new StartupState(instanceId)
@@ -157,6 +168,19 @@ async function choose(action, title) {
 }
 
 function registerIpc() {
+  handler('birdshot:review-mode', value => {
+    if (typeof value !== 'boolean') throw new Error('审阅模式无效')
+    if (value === reviewMode) return
+    reviewMode = value
+    if (value) { previousPageZoom = window.webContents.getZoomFactor(); window.webContents.setZoomFactor(1) }
+    else window.webContents.setZoomFactor(previousPageZoom)
+    configureMenu()
+  }, false)
+  handler('birdshot:review-close-response', (id, allow) => {
+    if (closeReviewRequest?.id !== id || typeof allow !== 'boolean') throw new Error('关闭确认已过期')
+    clearTimeout(closeReviewRequest.timer)
+    const resolve = closeReviewRequest.resolve; closeReviewRequest = null; resolve(allow)
+  }, false)
   handler('birdshot:retry-startup', async () => {
     if (startup.connected) return command('retry_startup').then(() => command('state'))
     if (!backend || backend.exitCode !== null) {
@@ -197,6 +221,18 @@ function protect(contents) {
   contents.on('will-navigate', (event, url) => { if (url !== pageUrl) event.preventDefault() })
   contents.on('will-attach-webview', event => event.preventDefault())
 }
+function confirmReviewClose() {
+  return new Promise(resolve => {
+    const id = randomUUID()
+    const timer = setTimeout(() => {
+      closeReviewRequest = null
+      dialog.showErrorBox('尚未退出', '审阅页面未确认草稿状态。请先保存或明确放弃未保存改动，再退出。')
+      resolve(false)
+    }, 15000)
+    closeReviewRequest = { id, timer, resolve }
+    window.webContents.send('birdshot:review-close-request', id)
+  })
+}
 
 async function stop() {
   if (!backend || backend.exitCode !== null) return
@@ -224,14 +260,17 @@ app.whenReady().then(async () => {
     webPreferences: { preload: path.join(here, 'preload.cjs'), contextIsolation: true, nodeIntegration: false,
       nodeIntegrationInSubFrames: false, sandbox: true, webSecurity: true, webviewTag: false } })
   protect(window.webContents)
-  window.on('close', event => {
+  configureMenu()
+  window.on('close', async event => {
     if (closing) return
     event.preventDefault()
+    if (closeReviewRequest) return
     if (reviewNative.isRunning()) {
       dialog.showMessageBox(window, { type: 'info', message: '回收操作尚未结束。',
         detail: '请在审阅界面取消剩余项目或等待完成，再退出App。已完成的项目不会被重复操作。' })
       return
     }
+    if (!await confirmReviewClose()) return
     if (lastState?.service?.mode !== 'local' && lastState?.service?.status === 'ready') {
       const choice = dialog.showMessageBoxSync(window, { type: 'question', buttons: ['退出并停止共享', '取消'],
         defaultId: 1, cancelId: 1, message: '关闭BirdShot将停止本App启动的共享服务，其他浏览器会断开。' })
@@ -250,6 +289,7 @@ app.whenReady().then(async () => {
   }
 }).catch(error => { dialog.showErrorBox('BirdShot无法启动', error.message); app.quit() })
 app.on('before-quit', event => {
-  if (!closing && backend?.exitCode === null) { event.preventDefault(); closing = true; stop().finally(() => app.quit()) }
+  if (!closing && window && !window.isDestroyed()) { event.preventDefault(); window.close() }
+  else if (!closing && backend?.exitCode === null) { event.preventDefault(); closing = true; stop().finally(() => app.quit()) }
 })
 app.on('window-all-closed', () => { if (!closing) { closing = true; stop().finally(() => app.quit()) } })

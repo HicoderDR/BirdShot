@@ -288,7 +288,7 @@ def _snapshot(state, groups):
             decision = state["decisions"].get(frame["identity"])
             trashed = frame["identity"] in state["trashed"]
             rows.append({key: deepcopy(frame[key]) for key in
-                         ("id", "sourceLabel", "width", "height", "capture", "supported", "automatic", "available")})
+                         ("id", "identity", "sourceLabel", "width", "height", "capture", "supported", "automatic", "available")})
             rows[-1].update(selected=decision["selected"] if decision else frame["automatic"],
                             manual=decision is not None, available=frame["available"] and not trashed)
         manual_reviewed = any(frame["identity"] in reviewed for frame in group["frames"])
@@ -336,6 +336,7 @@ class ReviewStore:
         self.lock = threading.RLock()
         self.recovery = set()
         self.registry_error = None
+        self.cache_path = Path(data) / "review-registry-cache-v1.json"
         if self.audit_path.exists():
             prepared = {}
             for line in self.audit_path.read_text(encoding="utf-8").splitlines():
@@ -379,8 +380,121 @@ class ReviewStore:
         with self.lock:
             return _snapshot(self.value, self.groups)
 
-    def publish(self):
+    def cache_registry(self, input_signature):
+        with self.lock:
+            frames = {key: {**value, "root": str(value["root"]), "path": str(value["path"])}
+                      for key, value in self.frames.items()}
+            groups = [{**{key: value for key, value in group.items() if key != "frames"},
+                       "frameIds": [frame["id"] for frame in group["frames"]]} for group in self.groups]
+            payload = {"version": 1, "inputSignature": input_signature,
+                       "viewSignature": self.signature, "groups": groups, "frames": frames}
+            _atomic(self.cache_path, {**payload, "payloadSha256": _hash(payload)})
+
+    def publish_cached_projection(self):
+        """Expose the previous completed view only; this never grants save/cleanup."""
+        manifest = _read(self.library / "manifest.json")
+        snapshot = _read(self.library / "review.json")
+        if snapshot.get("version") != 1 or manifest.get("version") != 1:
+            raise ValueError("Unsupported cached view schema")
+        photos = {photo["id"]: photo for photo in manifest["photos"]}
+        registered = {group["id"]: set(group["photoIds"]) for group in manifest["groups"]}
+        seen, reviewed = set(), {member for members in self.value["manualRevisionMembers"].values() for member in members}
+        for group in snapshot["groups"]:
+            if registered.get(group["id"]) != {frame["id"] for frame in group["frames"]}:
+                raise ValueError("Cached projection membership does not match its manifest")
+            for frame in group["frames"]:
+                if frame["id"] in seen:
+                    raise ValueError("Duplicate cached photo")
+                seen.add(frame["id"])
+                photo = photos[frame["id"]]
+                _, path = _registered_file(photo, photo["primary"], manifest)
+                frame["identity"] = _identity(path)
+                decision = self.value["decisions"].get(frame["identity"])
+                frame["selected"] = decision["selected"] if decision else frame["automatic"]
+                frame["manual"] = decision is not None
+                if frame["identity"] in self.value["trashed"]:
+                    frame["available"] = False
+            group["manualReviewed"] = any(frame["identity"] in reviewed for frame in group["frames"])
+            group["newFramesPending"] = sum(frame["identity"] not in reviewed for frame in group["frames"]) if group["manualReviewed"] else 0
+            group["selectedCount"] = sum(frame["selected"] for frame in group["frames"])
+        if seen != set(photos) or len(snapshot["groups"]) != len(registered):
+            raise ValueError("Cached view is incomplete")
+        snapshot["revision"] = self.value["revision"]
+        snapshot["preferences"] = deepcopy(self.value["preferences"])
+        frames = [frame for group in snapshot["groups"] for frame in group["frames"]]
+        snapshot["summary"] = {"groupCount": len(snapshot["groups"]), "frameCount": len(frames),
+                               "selectedCount": sum(frame["selected"] for frame in frames),
+                               "automaticCount": sum(frame["automatic"] for frame in frames),
+                               "manualReviewedCount": sum(group["manualReviewed"] for group in snapshot["groups"]),
+                               "fullyReviewedCount": sum(group["manualReviewed"] and not group["newFramesPending"] for group in snapshot["groups"]),
+                               "newFramesPending": sum(group["newFramesPending"] for group in snapshot["groups"]),
+                               "availableCount": sum(frame["available"] for frame in frames),
+                               "trashedCount": len(self.value["trashed"])}
+        snapshot["cached"] = True
+        _atomic(self.library / "review.json", snapshot)
+        return True
+
+    def restore_registry(self, input_signature):
+        if not self.cache_path.exists():
+            return False
+        cached = _read(self.cache_path)
+        if not isinstance(cached, dict) or cached.get("version") != 1:
+            raise ValueError("Unsupported review cache schema; original state is unchanged")
+        if cached.get("inputSignature") != input_signature:
+            return False
+        if cached.get("payloadSha256") != _hash({key: value for key, value in cached.items() if key != "payloadSha256"}):
+            raise ValueError("Cached review payload checksum mismatch")
+        manifest = _read(self.library / "manifest.json")
+        photos = {photo["id"]: photo for photo in manifest["photos"]}
+        frames = {}
+        for key, value in cached["frames"].items():
+            photo = photos.get(key)
+            if photo != value["photo"] or key != value["id"]:
+                raise ValueError("Cached photo does not match its registered manifest")
+            root, path = _registered_file(photo, photo["primary"], manifest)
+            if value["root"] != str(root) or value["path"] != str(path) or value["identity"] != _identity(path):
+                raise ValueError("Cached original path is not registered")
+            if any(type(value.get(field)) is not bool for field in ("automatic", "available", "supported", "sourceIssue")) or \
+                    not isinstance(value.get("items"), list):
+                raise ValueError("Invalid cached photo state")
+            frames[key] = {**value, "root": root, "path": path}
+        registered = {group["id"]: set(group["photoIds"]) for group in manifest["groups"]}
+        groups = []
+        for group in cached["groups"]:
+            if registered.get(group["id"]) != set(group["frameIds"]) or len(group["frameIds"]) != len(set(group["frameIds"])):
+                raise ValueError("Cached group membership changed")
+            groups.append({**{key: value for key, value in group.items() if key != "frameIds"},
+                           "frames": [frames[key] for key in group["frameIds"]]})
+        signature = _hash([(group["id"], group["revision"], [frame["id"] for frame in group["frames"]]) for group in groups])
+        if signature != cached["viewSignature"] or len(groups) != len(registered):
+            raise ValueError("Cached review signature changed")
+        self.frames, self.groups, self.manifest, self.signature = frames, groups, manifest, signature
+        return True
+
+    def validate_cached_sources(self, progress=None):
+        directories = {}
+        with self.lock:
+            for index, frame in enumerate(self.frames.values()):
+                if progress:
+                    progress("review-photos", index, len(self.frames))
+                try:
+                    info = _secure_stat(frame["root"], frame["path"], directories)
+                    primary = frame["photo"]["primary"]
+                    frame["available"] = not frame["sourceIssue"] and (info.st_size, info.st_mtime_ns) == (
+                        primary["size"], int(primary["mtimeNs"]))
+                except (OSError, ValueError, TypeError, KeyError):
+                    frame["available"] = False
+            for directory, expected in directories.items():
+                info = directory.lstat()
+                if (info.st_dev, info.st_ino, info.st_mode, getattr(info, "st_file_attributes", 0)) != expected:
+                    raise ValueError("Original directory changed during cached review validation")
+            if progress:
+                progress("review-photos", len(self.frames), len(self.frames))
+
+    def publish(self, cached=False):
         snapshot = self.snapshot()
+        if cached:
+            snapshot["cached"] = True
         _atomic(self.library / "review.json", snapshot)
         return snapshot
 
@@ -460,6 +574,67 @@ class ReviewStore:
                 value["undo"].append({"groupId": groupId, "members": identities, "decisions": before})
                 value["undo"] = value["undo"][-100:]
             self._commit(value)
+            return self.publish()
+
+    def save(self, expectedRevision, groups):
+        """Commit an explicit draft batch against the already registered view."""
+        with self.lock:
+            self._expected(expectedRevision)
+            if self.registry_error or not self.signature:
+                raise ValueError("Review registry unavailable; keep the unsaved draft and retry")
+            if not isinstance(groups, list) or not groups or len(groups) > 2000:
+                raise ValueError("Invalid review save batch")
+            registered = {group["id"]: group for group in self.groups}
+            seen_groups, seen_frames = set(), set()
+            value = deepcopy(self.value)
+            total = 0
+            for entry in groups:
+                if not isinstance(entry, dict) or set(entry) != {"groupId", "groupRevision", "changes"}:
+                    raise ValueError("Invalid review save group")
+                group = registered.get(entry["groupId"])
+                if not group or group["id"] in seen_groups:
+                    raise ValueError("Unknown or duplicate registered review group")
+                if entry["groupRevision"] != group["revision"]:
+                    raise ValueError("Review group revision conflict; inspect changed or new frames")
+                seen_groups.add(group["id"])
+                changes = entry["changes"]
+                if not isinstance(changes, list):
+                    raise ValueError("Invalid review changes")
+                total += len(changes)
+                if total > 20000:
+                    raise ValueError("Review save batch is too large")
+                members = {frame["id"]: frame for frame in group["frames"]}
+                before = {frame["identity"]: deepcopy(value["decisions"].get(frame["identity"]))
+                          for frame in group["frames"]}
+                for change in changes:
+                    if not isinstance(change, dict) or set(change) != {
+                            "frameId", "identity", "selected", "manual", "baseSelected", "baseManual"}:
+                        raise ValueError("Invalid review draft change")
+                    frame = members.get(change["frameId"])
+                    if not frame or change["identity"] != frame["identity"] or frame["identity"] in seen_frames or any(
+                            type(change[key]) is not bool for key in ("selected", "manual", "baseSelected", "baseManual")):
+                        raise ValueError("Draft must use unique registered photo identities and boolean states")
+                    if not frame["available"] or frame["sourceIssue"]:
+                        raise ValueError("Original changed or unavailable; keep draft and inspect the source")
+                    seen_frames.add(frame["identity"])
+                    previous = value["decisions"].get(frame["identity"])
+                    selected = previous["selected"] if previous else frame["automatic"]
+                    if (selected, previous is not None) != (change["baseSelected"], change["baseManual"]):
+                        raise ValueError("Review selection conflict; keep draft and inspect this photo")
+                    if change["manual"]:
+                        value["decisions"][frame["identity"]] = {"selected": change["selected"]}
+                    elif change["selected"] == frame["automatic"]:
+                        value["decisions"].pop(frame["identity"], None)
+                    else:
+                        raise ValueError("An automatic state must match the registered recommendation")
+                identities = [frame["identity"] for frame in group["frames"]]
+                existing = set(value["manualRevisionMembers"].get(group["id"], []))
+                value["manualRevisionMembers"][group["id"]] = sorted(existing | set(identities))
+                if before != {identity: value["decisions"].get(identity) for identity in identities}:
+                    value["undo"].append({"groupId": group["id"], "members": identities, "decisions": before})
+            value["undo"] = value["undo"][-100:]
+            if value != self.value:
+                self._commit(value)
             return self.publish()
 
     def preferences(self, expectedRevision, exitAction):

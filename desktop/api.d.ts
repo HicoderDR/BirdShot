@@ -59,7 +59,10 @@ export interface State {
 export interface DesktopAPI {
   getState(): Promise<State>
   retryStartup(): Promise<State>
-  review(action: 'state' | 'decide' | 'preferences' | 'cleanupPreview' | 'cleanupExecute' | 'cleanupCancel',
+  setReviewMode(immersive: boolean): Promise<void>
+  reviewCloseResponse(id: string, allow: boolean): Promise<void>
+  onReviewCloseRequest(callback: (id: string) => void): () => void
+  review(action: 'state' | 'save' | 'decide' | 'preferences' | 'cleanupPreview' | 'cleanupExecute' | 'cleanupCancel',
     params?: Record<string, unknown>): Promise<unknown>
   onReviewProgress(listener: (progress: { token: string; completed: number; total: number }) => void): () => void
   checkForUpdates(): Promise<{currentVersion: string; status: 'none' | 'upToDate' | 'available' | 'incompatible' | 'error';

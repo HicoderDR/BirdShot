@@ -13,7 +13,9 @@
       <div><h1>BirdShot <small>连拍审阅</small></h1><p id="summary" class="muted">正在读取连拍组…</p></div>
       <div class="home-tools">
         <button id="refresh" type="button">刷新</button>
-        <button id="cleanup" type="button" disabled>清理已遴选组</button>
+        <button id="save-draft" type="button" disabled>保存遴选状态</button>
+        <button id="discard-draft" type="button" disabled>放弃未保存改动</button>
+        <button id="cleanup" type="button" disabled>清理已保存的遴选组</button>
         <button id="reset-exit" type="button" disabled>重置退出偏好</button>
       </div>
     </header>
@@ -36,15 +38,14 @@
           <button id="reject-frame" type="button" data-write>取消保留 <kbd>S</kbd></button>
           <button id="undo" type="button" data-write>撤销</button>
           <button id="restore" type="button" data-write>恢复自动</button>
+          <button id="save-immersive" type="button" disabled>保存遴选状态</button>
           <button id="multiselect" type="button" aria-pressed="false">多选</button>
           <button id="drawer-toggle" type="button" aria-expanded="false" aria-controls="review-drawer">鸟体与组墙</button>
-          <button id="help-button" type="button" aria-expanded="false" aria-controls="help">帮助</button>
           <button id="exit" type="button">退出 <kbd>Esc</kbd></button>
         </div>
       </header>
-      <p id="immersive-status" class="save-status" role="status" aria-live="polite"></p>
       <div id="viewer-body" class="viewer-body">
-        <div id="stage" class="stage" aria-label="原图画布，Ctrl加滚轮放缩，触控双指放缩">
+        <div id="stage" class="stage" tabindex="0" aria-label="原图画布，Ctrl加滚轮或加减号放缩，方向键平移，触控双指放缩">
           <div id="source-layer" class="source-layer">
             <svg id="source-overlay" class="source-overlay" xmlns="http://www.w3.org/2000/svg" aria-label="Birder已确认鸟体分割轮廓"></svg>
           </div>
@@ -79,18 +80,22 @@
         <svg id="leaders" class="leaders" xmlns="http://www.w3.org/2000/svg" aria-hidden="true"></svg>
       </div>
       <section id="filmstrip" class="filmstrip" aria-label="该组全部原始帧"></section>
-      <div id="help" class="help" hidden>
-        <div><strong>连拍审阅</strong><span><kbd>Q</kbd> / <kbd>E</kbd> 前后组</span><span><kbd>A</kbd> / <kbd>D</kbd> 前后帧</span><span><kbd>Space</kbd> 切换保留 · <kbd>W</kbd> 保留 · <kbd>S</kbd> 不选</span><span><kbd>Ctrl</kbd> + 滚轮指针放缩；双指放缩 / 拖动画布</span><span>多选或长按缩略图；退出 / 清理均有确认</span></div>
-      </div>
+      <p id="immersive-status" class="save-status" role="status" aria-live="polite"></p>
+      <footer id="help" class="shortcut-guide" aria-label="审阅操作指南">
+        <span class="keyboard-guide"><kbd>A</kbd>/<kbd>D</kbd> 前后帧 · <kbd>Q</kbd>/<kbd>E</kbd> 前后组</span>
+        <span class="keyboard-guide"><kbd>Space</kbd> 切换保留 · <kbd>W</kbd> 保留 · <kbd>S</kbd> 不选</span>
+        <span class="keyboard-guide"><kbd>Ctrl</kbd> +/- 缩放 · 方向键向该方向看（可长按）· Ctrl+滚轮指针放缩</span>
+        <span>双指放缩/拖动</span>
+        <span>长按缩略图多选 · <kbd>Esc</kbd> 退出 · 遴选→保存状态→独立清理</span>
+      </footer>
     </section>
     <dialog id="exit-dialog" aria-labelledby="exit-title">
-      <h2 id="exit-title">结束这次审阅？</h2>
-      <p>不选只是保存遴选状态，不会立即删除文件。</p>
-      <label class="check-row"><input id="remember-exit" type="checkbox">记住这次退出选项（默认不记住）</label>
+      <h2 id="exit-title">有未保存的遴选改动</h2>
+      <p>当前选择只在内存中。保存仅记录状态，不复制或删除照片；清理需要另行预览和确认。</p>
       <div class="dialog-actions">
-        <button id="exit-only" type="button">退出</button>
-        <button id="exit-cleanup" type="button" data-write>退出并清理</button>
-        <button id="continue-review" type="button">继续审阅</button>
+        <button id="exit-save" type="button">保存并退出</button>
+        <button id="exit-discard" type="button">放弃未保存改动</button>
+        <button id="continue-review" type="button" autofocus>继续审阅</button>
       </div>
     </dialog>
     <dialog id="cleanup-dialog" aria-labelledby="cleanup-title">
@@ -107,7 +112,7 @@
     <dialog id="zero-dialog" aria-labelledby="zero-title">
       <h2 id="zero-title">明确清理零保留整组？</h2>
       <p>这些组没有任何保留照片。只对这一次勾选授权，下一次仍默认跳过；系统还会再次确认。</p>
-      <div class="dialog-actions"><button id="zero-confirm" type="button">此次包含零保留组</button><button id="zero-cancel" type="button">仍然跳过</button></div>
+      <div class="dialog-actions"><button id="zero-confirm" type="button">此次包含零保留组</button><button id="zero-cancel" type="button" autofocus>仍然跳过</button></div>
     </dialog>
   </main>
   <script type="module" src="/review.js"></script>

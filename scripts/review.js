@@ -108,6 +108,23 @@ export function shortcut(event) {
     target?.closest?.('input,textarea,select,[contenteditable]:not([contenteditable="false"]),dialog')) return null
   return ({ q: 'previousGroup', e: 'nextGroup', a: 'previousFrame', d: 'nextFrame', ' ': 'toggle', w: 'keep', s: 'reject', Escape: 'exit' })[event.key?.length === 1 ? event.key.toLowerCase() : event.key] || null
 }
+export function canvasShortcut(event) {
+  if (event.isComposing || event.keyCode === 229 || event.metaKey || event.altKey ||
+      event.target?.closest?.('input,textarea,select,[contenteditable]:not([contenteditable="false"]),dialog')) return null
+  if (event.ctrlKey) {
+    if (['+', '='].includes(event.key) || ['Equal', 'NumpadAdd'].includes(event.code)) return 'zoomIn'
+    if (event.key === '-' || ['Minus', 'NumpadSubtract'].includes(event.code)) return 'zoomOut'
+    return null
+  }
+  return ({ ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down' })[event.key] || null
+}
+export function panView(view, frame, width, height, dx, dy) {
+  const bounds = geometry(frame, width, height, view)
+  const limit = (center, viewport, image) => image <= viewport ? .5 :
+    Math.min(1 - viewport / (2 * image), Math.max(viewport / (2 * image), center))
+  return { ...view, cx: limit(view.cx + dx / (bounds.width * bounds.factor), width, bounds.width * bounds.factor),
+    cy: limit(view.cy + dy / (bounds.height * bounds.factor), height, bounds.height * bounds.factor) }
+}
 export function technicalSentence(instance) {
   if (!instance) return '此帧没有已确认鸟体；保留仅改变照片遴选状态，不代表鸟种确认。'
   const verification = instance.birdVerification?.status
@@ -123,7 +140,7 @@ export function technicalSentence(instance) {
   return `Birder 已验鸟，${decision}；${evidence.length ? evidence.join('，') : '暂无可比较技术质量证据'}。`
 }
 export function createNativeBridge(win, { capability = () => {}, progress = () => {} } = {}) {
-  let writable = false, sequence = 0, disposed = false
+  let writable = false, validated = true, sequence = 0, disposed = false
   const pending = new Map()
   const embedded = win.parent !== win
   const validParent = event => embedded && event.source === win.parent && (event.origin === 'null' || event.origin === 'file://')
@@ -133,7 +150,10 @@ export function createNativeBridge(win, { capability = () => {}, progress = () =
     if (!message || typeof message !== 'object') return
     if (message.type === 'birdshot-review-capabilities') {
       writable = message.writable === true
+      validated = message.validated !== false
       capability(writable)
+    } else if (message.type === 'birdshot-review-validation') {
+      validated = message.validated === true; capability(writable)
     } else if (message.type === 'birdshot-review-response' && typeof message.id === 'string' && pending.has(message.id)) {
       const request = pending.get(message.id)
       pending.delete(message.id); win.clearTimeout(request.timer)
@@ -147,8 +167,10 @@ export function createNativeBridge(win, { capability = () => {}, progress = () =
   else win.addEventListener('load', ready, { once: true })
   return {
     get writable() { return writable },
+    get validated() { return validated },
     request(action, params = {}) {
       if (!writable || !embedded || disposed) return Promise.reject(new Error('浏览器只读；请在桌面中保存'))
+      if (!validated && action !== 'cleanupCancel') return Promise.reject(new Error('缓存正在校验，尚不能保存或清理；内存遴选不会丢失'))
       const id = `review-${Date.now()}-${++sequence}`
       return new Promise((resolve, reject) => {
         const timer = win.setTimeout(() => { pending.delete(id); reject(new Error('桌面响应超时；请刷新读取真实保存状态')) }, 120000)
@@ -157,12 +179,107 @@ export function createNativeBridge(win, { capability = () => {}, progress = () =
       })
     },
     mode(immersive) { if (embedded && !disposed) win.parent.postMessage({ type: 'birdshot-review-mode', immersive: Boolean(immersive) }, '*') },
+    closeResponse(id, allow) { if (embedded && !disposed) win.parent.postMessage({ type: 'birdshot-review-close-response', id, allow }, '*') },
     dispose() {
       disposed = true; win.removeEventListener('message', receive); win.removeEventListener('load', ready)
       for (const request of pending.values()) { win.clearTimeout(request.timer); request.reject(new Error('审阅页面已关闭')) }
       pending.clear()
     }
   }
+}
+export class ReviewDraft {
+  constructor() { this.pending = new Map(); this.touched = new Map(); this.history = []; this.sequence = 0 }
+  get dirty() { return this.touched.size > 0 }
+  get conflicts() {
+    return [...this.pending.values()].filter(entry => entry.conflict).length +
+      [...this.touched.values()].filter(entry => entry.conflict).length
+  }
+  accept(snapshot) {
+    validateSnapshot(snapshot)
+    if (this.base && snapshot.revision < this.base.revision) return this.working
+    this.base = structuredClone(snapshot); this.working = structuredClone(snapshot)
+    this.byId = new Map(); this.byIdentity = new Map()
+    for (const group of this.working.groups) for (const frame of group.frames) {
+      const identity = frame.identity || frame.id
+      const row = { group, frame, identity }
+      this.byId.set(frame.id, row); this.byIdentity.set(identity, row)
+    }
+    for (const [identity, entry] of this.pending) {
+      const row = this.byIdentity.get(identity)
+      entry.conflict = !row || row.group.id !== entry.groupId || row.group.revision !== entry.groupRevision ||
+        row.frame.selected !== entry.baseSelected || Boolean(row.frame.manual) !== entry.baseManual
+      if (row) { row.frame.selected = entry.selected; row.frame.manual = entry.manual; entry.frameId = row.frame.id }
+    }
+    for (const [id, entry] of this.touched) {
+      const group = this.working.groups.find(group => group.id === id)
+      entry.conflict = !group || group.revision !== entry.groupRevision
+      if (group) {
+        group.manualReviewed = true
+        group.newFramesPending = group.frames.filter(frame => !entry.members.includes(frame.identity || frame.id)).length
+      }
+    }
+    for (const group of this.working.groups) group.selectedCount = group.frames.filter(frame => frame.selected).length
+    return this.working
+  }
+  edit(groupId, changes, restore = false, record = true) {
+    const group = this.working?.groups.find(group => group.id === groupId)
+    if (!group) return false
+    const before = group.frames.map(frame => ({ frameId: frame.id, selected: frame.selected, manual: Boolean(frame.manual) }))
+    let changed = false
+    for (const change of changes) {
+      const row = this.byId.get(change.frameId)
+      if (!row || row.group.id !== groupId || typeof change.selected !== 'boolean') throw new Error('未登记的遴选照片')
+      const old = this.pending.get(row.identity), manual = restore ? false : change.manual ?? true
+      if (row.frame.selected === change.selected && (!(restore || change.manual !== undefined) ||
+          Boolean(row.frame.manual) === manual) && !old?.conflict) continue
+      const base = this.base.groups.find(group => group.id === groupId)?.frames.find(frame => (frame.identity || frame.id) === row.identity)
+      if (!base) throw new Error('照片来源已变化，请刷新并重新核对')
+      const entry = { groupId, groupRevision: group.revision, frameId: row.frame.id, identity: row.identity,
+        baseSelected: old && !old.conflict ? old.baseSelected : base.selected,
+        baseManual: old && !old.conflict ? old.baseManual : Boolean(base.manual),
+        selected: change.selected, manual, sequence: ++this.sequence, conflict: false }
+      this.pending.set(row.identity, entry)
+      row.frame.selected = entry.selected; row.frame.manual = entry.manual; changed = true
+    }
+    if (!changed) return false
+    this.touched.set(groupId, { groupRevision: group.revision,
+      members: group.frames.map(frame => frame.identity || frame.id), sequence: ++this.sequence, conflict: false })
+    group.manualReviewed = true; group.newFramesPending = 0
+    group.selectedCount = group.frames.filter(frame => frame.selected).length
+    if (record) { this.history.push({ groupId, before }); this.history = this.history.slice(-100) }
+    return true
+  }
+  undo(groupId) {
+    const index = this.history.findLastIndex(entry => entry.groupId === groupId)
+    if (index < 0) return false
+    const entry = this.history.splice(index, 1)[0]
+    return this.edit(groupId, entry.before, false, false)
+  }
+  batch() {
+    if (this.conflicts) throw new Error('草稿有冲突：请对相关照片重新保留/不选，或放弃未保存改动')
+    const groups = [...this.touched].map(([groupId, group]) => ({ groupId, groupRevision: group.groupRevision,
+      changes: [...this.pending.values()].filter(entry => entry.groupId === groupId).map(entry => ({
+        frameId: entry.frameId, identity: entry.identity, selected: entry.selected, manual: entry.manual,
+        baseSelected: entry.baseSelected, baseManual: entry.baseManual })) }))
+    return { expectedRevision: this.base.revision, groups }
+  }
+  capture() { return { frames: new Map([...this.pending].map(([id, entry]) => [id, entry.sequence])),
+    groups: new Map([...this.touched].map(([id, entry]) => [id, entry.sequence])) } }
+  acknowledge(snapshot, sent) {
+    const rows = new Map(snapshot.groups.flatMap(group => group.frames.map(frame => [frame.identity || frame.id, { frame, group }])))
+    for (const [id, sequence] of sent.frames) {
+      const entry = this.pending.get(id), row = rows.get(id)
+      if (!entry) continue
+      if (entry.sequence === sequence) this.pending.delete(id)
+      else if (row && snapshot.revision >= this.base.revision) {
+        entry.baseSelected = row.frame.selected; entry.baseManual = Boolean(row.frame.manual)
+        entry.groupRevision = row.group.revision
+      }
+    }
+    for (const [id, sequence] of sent.groups) if (this.touched.get(id)?.sequence === sequence) this.touched.delete(id)
+    return this.accept(snapshot)
+  }
+  discard() { this.pending.clear(); this.touched.clear(); this.history = []; return this.accept(this.base) }
 }
 class ProgressiveImage {
   constructor(win, replace, status) {
@@ -234,7 +351,13 @@ export function createReviewApp(doc = document, win = window) {
     view: { scale: 1, cx: .5, cy: .5 }, multi: false, busy: false, loading: false, detailSequence: 0,
     selectedCrop: null, hoveredCrop: null, pointers: new Map(), wallFull: false, mask: true, pose: false,
     cleanup: null, cleanupSequence: 0, cleanupBusy: false, cleanupExit: false, referenceSequence: 0, helpPinned: false,
-    ignoreFilmClickUntil: 0 }
+    ignoreFilmClickUntil: 0, saving: false, saveError: '', exitIntent: null, closeId: null }
+  const draft = new ReviewDraft()
+  function releasePointers() {
+    const stage = $('stage')
+    for (const id of [...state.pointers.keys()]) if (stage.hasPointerCapture(id)) stage.releasePointerCapture(id)
+    state.pointers.clear()
+  }
   const group = () => state.snapshot?.groups.find(group => group.id === state.groupId)
   const label = group => groupLabel(group, state.snapshot.groups.indexOf(group) + 1)
   const frame = () => {
@@ -244,14 +367,14 @@ export function createReviewApp(doc = document, win = window) {
     return { ...summary, ...detail, selected: summary.selected, automatic: summary.automatic, manual: summary.manual,
       sourceLabel: summary.sourceLabel || detail?.source?.primary?.relative || summary.id, instances: detail?.instances || [] }
   }
-  const visible = () => state.snapshot ? filteredGroups(state.snapshot, state.gallery, {
-    mode: $('navigation-mode').value, directory: $('navigation-group').value,
-    search: $('search').value, status: $('status-filter').value }) : []
+  let visibleGroups = []
+  const visible = () => visibleGroups
   const bridge = createNativeBridge(win, {
     capability: async writable => {
       updateWritable()
       if (!writable) return
-      try { applySnapshot(await bridge.request('state')); setStatus('桌面已连接 · 更改保存后才更新勾选') }
+      if (!bridge.validated) { draftStatus(); return }
+      try { applySnapshot(await bridge.request('state')); draftStatus() }
       catch (error) { setStatus(error.message, true) }
     },
     progress: message => {
@@ -263,16 +386,23 @@ export function createReviewApp(doc = document, win = window) {
     for (const id of ['save-status', 'immersive-status']) { $(id).textContent = message; $(id).dataset.error = String(error) }
   }
   function updateWritable() {
-    const disabled = !bridge.writable || state.busy || state.loading || !state.snapshot
+    const focused = doc.activeElement
+    const disabled = !bridge.writable || state.cleanupBusy || !state.snapshot
     doc.querySelectorAll('[data-write]').forEach(button => { button.disabled = disabled })
-    $('cleanup').disabled = disabled
-    $('reset-exit').disabled = disabled
+    $('cleanup').disabled = disabled || state.saving || !bridge.validated
+    $('reset-exit').disabled = disabled || state.saving || !bridge.validated
+    for (const id of ['save-draft', 'save-immersive']) $(id).disabled = disabled || state.saving || !bridge.validated || !draft.dirty || draft.conflicts > 0
+    $('discard-draft').disabled = disabled || state.saving || !draft.dirty
     doc.querySelectorAll('.frame-check input').forEach(input => { input.disabled = disabled || !state.multi })
+    if (focused?.disabled && !$('immersive').hidden) $('stage').focus({ preventScroll: true })
   }
   function applySnapshot(snapshot) {
-    state.snapshot = validateSnapshot(snapshot)
-    if (state.groupId && !group()) leave()
-    if (group()) state.frameIndex = Math.min(state.frameIndex, Math.max(0, group().frames.length - 1))
+    const selectedFrame = frame()?.id
+    state.snapshot = draft.accept(snapshot)
+    if (group()) {
+      const index = group().frames.findIndex(frame => frame.id === selectedFrame)
+      state.frameIndex = index >= 0 ? index : Math.min(state.frameIndex, Math.max(0, group().frames.length - 1))
+    }
     renderHome()
     if (state.groupId) { renderTitles(); renderFilmstrip(); renderWall(); renderNav() }
     updateWritable()
@@ -284,7 +414,7 @@ export function createReviewApp(doc = document, win = window) {
       const [snapshot, gallery] = await Promise.all([fetchJSON('/review.json'), fetchJSON('/gallery.json')])
       state.gallery = gallery
       applySnapshot(snapshot); renderDirectories()
-      setStatus(bridge.writable ? '桌面已连接 · 更改保存后才更新勾选' : '浏览器只读 · 桌面内可保存')
+      draftStatus()
     } catch (error) { setStatus(error.message, true) }
     finally { state.loading = false; $('refresh').disabled = false; $('group-grid').setAttribute('aria-busy', 'false'); updateWritable() }
   }
@@ -335,10 +465,14 @@ export function createReviewApp(doc = document, win = window) {
     else badges.append(node('span', 'badge pending', '待审阅'))
     if (group.newFramesPending) badges.append(node('span', 'badge pending', `新增 ${group.newFramesPending} 待审`))
     if (!selected) badges.append(node('span', 'badge pending', '无保留'))
+    if (draft.touched.has(group.id)) badges.append(node('span', 'badge pending', '未保存'))
     return badges
   }
   function renderHome() {
     if (!state.snapshot) return
+    visibleGroups = filteredGroups(state.snapshot, state.gallery, {
+      mode: $('navigation-mode').value, directory: $('navigation-group').value,
+      search: $('search').value, status: $('status-filter').value })
     const entries = visible(), grid = $('group-grid')
     grid.replaceChildren()
     $('summary').textContent = `${state.snapshot.groups.length} 组 · ${state.snapshot.groups.reduce((sum, group) => sum + group.frames.length, 0)} 帧 · 按原始连拍顺序`
@@ -373,12 +507,13 @@ export function createReviewApp(doc = document, win = window) {
   async function openGroup(id) {
     if (!validGroupId(id) || !state.snapshot?.groups.some(group => group.id === id)) return
     if (state.groupId === id) return
+    stopCanvasKeys()
     state.detailSequence++; const sequence = state.detailSequence
     state.groupId = id; state.frameIndex = 0; state.detail = null; state.multi = false; state.selectedCrop = null; state.hoveredCrop = null
-    state.view = { scale: 1, cx: .5, cy: .5 }; state.pointers.clear()
+    state.view = { scale: 1, cx: .5, cy: .5 }; releasePointers()
     state.helpPinned = false; closeDrawer(); $('immersive').hidden = false; doc.body.classList.add('reviewing'); bridge.mode(true)
     $('multiselect').setAttribute('aria-pressed', 'false')
-    renderTitles(); renderFilmstrip(); renderWall(); renderNav(); showFrame(); showHelp(true)
+    renderTitles(); renderFilmstrip(); renderWall(); renderNav(); showFrame()
     try {
       const detail = await fetchJSON('/gallery/group/' + id + '.json')
       if (sequence !== state.detailSequence || state.groupId !== id) return
@@ -407,7 +542,7 @@ export function createReviewApp(doc = document, win = window) {
     const current = frame()
     progressive.stop(); $('source-layer').querySelector('.source-image')?.remove()
     $('source-overlay').replaceChildren(); $('leaders').replaceChildren()
-    state.selectedCrop = null; state.hoveredCrop = null; state.pointers.clear(); state.referenceSequence++
+    state.selectedCrop = null; state.hoveredCrop = null; releasePointers(); state.referenceSequence++
     renderTitles(); renderCrops(); renderNav()
     if (!current) { $('resolution-status').textContent = '没有可用帧'; return }
     $('download-original').href = '/original/' + current.id + '?download=1'
@@ -415,14 +550,16 @@ export function createReviewApp(doc = document, win = window) {
     progressive.start(current)
   }
   function renderNav() {
+    const focused = doc.activeElement
     const entries = visible(), index = entries.findIndex(entry => entry.group.id === state.groupId)
     $('previous-group').disabled = index <= 0
     $('next-group').disabled = index < 0 || index >= entries.length - 1
     $('previous-frame').disabled = state.frameIndex <= 0
     $('next-frame').disabled = !group() || state.frameIndex >= group().frames.length - 1
+    if (focused?.disabled && !$('immersive').hidden) $('stage').focus({ preventScroll: true })
   }
   function moveGroup(delta) {
-    if (state.busy || state.cleanupBusy) return
+    if (state.cleanupBusy) return
     const entries = visible(), index = entries.findIndex(entry => entry.group.id === state.groupId), entry = entries[index + delta]
     if (index >= 0 && entry) openGroup(entry.group.id)
   }
@@ -591,7 +728,7 @@ export function createReviewApp(doc = document, win = window) {
       button.append(image(previewURL(current.id), current.sourceLabel || current.id, false), node('span', '', current.sourceLabel || current.id))
       const label = node('label', 'frame-check'), checkbox = node('input')
       label.classList.toggle('selected', current.selected)
-      checkbox.type = 'checkbox'; checkbox.checked = current.selected; checkbox.disabled = !state.multi || !bridge.writable || state.busy
+      checkbox.type = 'checkbox'; checkbox.checked = current.selected; checkbox.disabled = !state.multi || !bridge.writable || state.cleanupBusy
       checkbox.setAttribute('aria-label', `保留 ${current.sourceLabel || current.id}`)
       label.append(checkbox, doc.createTextNode('保留')); tile.append(button, label)
       if (current.manual) tile.append(node('span', 'frame-state', '人工'))
@@ -615,14 +752,14 @@ export function createReviewApp(doc = document, win = window) {
       button.addEventListener('click', () => {
         if (Date.now() < suppressUntil || Date.now() < state.ignoreFilmClickUntil) return
         navigateFrame(index)
-        if (state.multi) saveChanges([{ frameId: current.id, selected: !group().frames.find(frame => frame.id === current.id).selected }])
+        if (state.multi) editChanges([{ frameId: current.id, selected: !group().frames.find(frame => frame.id === current.id).selected }])
       })
       label.addEventListener('click', event => event.stopPropagation())
       label.addEventListener('pointerdown', event => event.stopPropagation())
       checkbox.addEventListener('change', () => {
         const desired = checkbox.checked
         checkbox.checked = group().frames.find(frame => frame.id === current.id).selected
-        navigateFrame(index); saveChanges([{ frameId: current.id, selected: desired }])
+        navigateFrame(index); editChanges([{ frameId: current.id, selected: desired }])
       })
       strip.append(tile)
     }
@@ -637,20 +774,58 @@ export function createReviewApp(doc = document, win = window) {
   }
   async function recover(error) {
     try { applySnapshot(bridge.writable ? await bridge.request('state') : await fetchJSON('/review.json')) }
-    catch { /* Keep the last confirmed snapshot, never an optimistic checkmark. */ }
-    setStatus(/revision|conflict|并发|版本|changed/i.test(error.message) ?
-      '保存版本冲突：已重读真实状态，请核对后重试（未假保存）。' : `${error.message}；已尝试重读真实状态，未假保存。`, true)
+    catch (failure) { state.saveError = `状态重读失败：${failure.message}。` }
+    state.saveError += /revision|conflict|并发|版本|changed/i.test(error.message) ?
+      '保存版本冲突：草稿未丢失，已合并未冲突项；冲突照片请重新保留/不选后再保存。' :
+      `保存失败：${error.message}；内存遴选仍保留，可重试。`
+    draftStatus()
   }
-  async function saveChanges(changes, action = 'set') {
+  function draftStatus() {
+    setStatus(state.saveError || (!bridge.writable ? state.snapshot?.cached ?
+      '上次已缓存内容 · 正在检查来源与模型（浏览器只读）' : '浏览器只读 · 请在桌面中遴选' :
+      draft.dirty ? `未保存 · ${draft.touched.size} 组 / ${draft.pending.size} 张改动${draft.conflicts ? ` · ${draft.conflicts} 项冲突需核对` : ''} · 不会修改原照片` :
+        '遴选状态已同步 · Space/W/S仅改内存，点击“保存遴选状态”后落盘；回收是独立操作'), Boolean(state.saveError))
+    if (bridge.writable && !bridge.validated && !state.saveError) setStatus(`已缓存，正在检查来源与模型${draft.dirty ? ` · 未保存 ${draft.touched.size} 组改动` : ''} · 校验完成后才能保存/清理`)
+    updateWritable()
+  }
+  function repaintChoices() {
+    renderTitles()
+    for (const tile of $('filmstrip').querySelectorAll('.frame-tile')) {
+      const current = group()?.frames.find(frame => frame.id === tile.dataset.frameId)
+      if (!current) continue
+      tile.querySelector('input').checked = current.selected
+      tile.querySelector('.frame-check').classList.toggle('selected', current.selected)
+      let tag = tile.querySelector('.frame-state')
+      if (!tag) { tag = node('span', 'frame-state'); tile.append(tag) }
+      tag.textContent = current.manual ? draft.pending.has(current.identity || current.id) ? '人工 · 未保存' : '人工' :
+        current.selected && current.automatic ? '自动' : ''
+    }
+    const button = [...$('group-grid').querySelectorAll('.group-open')].find(button => button.dataset.groupId === state.groupId)
+    if (button && group()) button.querySelector('.badges').replaceWith(groupBadges(group()))
+    draftStatus()
+  }
+  function editChanges(changes, action = 'set') {
     const active = group()
-    if (!active || state.busy || state.cleanupBusy) return
-    if (!bridge.writable) { setStatus('浏览器只读 · 请在桌面中保存', true); return }
-    state.busy = true; updateWritable(); setStatus('正在保存…')
+    if (!active || state.cleanupBusy) return
+    if (!bridge.writable) { setStatus('浏览器只读 · 请在桌面中遴选', true); return }
+    if (action === 'undo') draft.undo(active.id)
+    else draft.edit(active.id, action === 'restoreAutomatic' ?
+      active.frames.map(frame => ({ frameId: frame.id, selected: frame.automatic })) : changes, action === 'restoreAutomatic')
+    state.snapshot = draft.working; repaintChoices()
+  }
+  async function saveDraft() {
+    if (state.saving || state.cleanupBusy || !bridge.writable || !draft.dirty) return !draft.dirty
+    let batch
+    try { batch = draft.batch() }
+    catch (error) { state.saveError = error.message; draftStatus(); return false }
+    const sent = draft.capture()
+    state.saving = true; state.saveError = ''; updateWritable(); setStatus('正在保存遴选状态…仍可切帧、切组和继续遴选')
     try {
-      const snapshot = await bridge.request('decide', { expectedRevision: state.snapshot.revision, groupId: active.id, changes, action })
-      applySnapshot(snapshot); setStatus('已保存 · 人工审阅状态以实际保存结果为准')
-    } catch (error) { await recover(error) }
-    finally { state.busy = false; updateWritable() }
+      const snapshot = await bridge.request('save', batch)
+      draft.acknowledge(snapshot, sent); applySnapshot(snapshot); draftStatus()
+      return !draft.dirty
+    } catch (error) { await recover(error); return false }
+    finally { state.saving = false; updateWritable() }
   }
   async function preference(exitAction) {
     if (!bridge.writable || state.busy) return false
@@ -661,32 +836,40 @@ export function createReviewApp(doc = document, win = window) {
   }
   function toggleCurrent(selected) {
     const current = frame()
-    if (current) saveChanges([{ frameId: current.id, selected: selected ?? !current.selected }])
+    if (current) editChanges([{ frameId: current.id, selected: selected ?? !current.selected }])
   }
   function leave() {
-    state.detailSequence++; state.groupId = null; state.detail = null; state.pointers.clear(); progressive.stop(); state.referenceSequence++
+    stopCanvasKeys()
+    state.detailSequence++; state.groupId = null; state.detail = null; releasePointers(); progressive.stop(); state.referenceSequence++
     $('source-layer').querySelector('.source-image')?.remove(); $('source-overlay').replaceChildren(); $('leaders').replaceChildren()
-    $('immersive').hidden = true; $('help').hidden = true; state.helpPinned = false
+    $('immersive').hidden = true
     doc.body.classList.remove('reviewing'); bridge.mode(false)
-    win.clearTimeout(helpTimer); closeDrawer()
+    closeDrawer(); renderHome()
   }
-  function requestExit() {
-    if (state.busy || state.cleanupBusy || doc.querySelector('dialog[open]')) return
-    const choice = state.snapshot.preferences?.exitAction || 'ask'
-    if (choice === 'exit') leave()
-    else if (choice === 'cleanup' && bridge.writable) beginCleanup(true)
-    else { $('remember-exit').checked = false; $('exit-dialog').showModal() }
+  function finishExit() {
+    if (state.exitIntent === 'close') bridge.closeResponse(state.closeId, true)
+    else if (state.exitIntent === 'cleanup') beginCleanup()
+    else if (state.exitIntent !== 'discard') leave()
+    state.exitIntent = null; state.closeId = null
   }
-  let helpTimer
-  function showHelp(flash = false) {
-    win.clearTimeout(helpTimer); $('help').hidden = false; $('help').classList.toggle('flash', flash)
-    $('help-button').setAttribute('aria-expanded', 'true')
-    if (flash) helpTimer = win.setTimeout(() => { if (!state.helpPinned) hideHelp() }, 2800)
+  function requestExit(intent = 'exit', id = null) {
+    stopCanvasKeys()
+    if (state.cleanupBusy || state.saving || doc.querySelector('dialog[open]')) {
+      if (intent === 'close') bridge.closeResponse(id, false)
+      return
+    }
+    state.exitIntent = intent; state.closeId = id
+    if (!draft.dirty) { finishExit(); return }
+    $('exit-title').textContent = intent === 'cleanup' ? '清理前请先保存遴选' : '有未保存的遴选改动'
+    $('exit-save').textContent = intent === 'cleanup' ? '保存后预览清理' : intent === 'discard' ? '保存改动' : '保存并退出'
+    $('exit-discard').hidden = intent === 'cleanup'
+    $('exit-dialog').showModal()
   }
-  function hideHelp() { if (state.helpPinned) return; $('help').hidden = true; $('help-button').setAttribute('aria-expanded', 'false') }
   function closeDrawer() { $('review-drawer').classList.remove('open'); $('drawer-toggle').setAttribute('aria-expanded', 'false'); drawLeaders() }
   async function beginCleanup(exitAfter = false) {
     if (!bridge.writable || state.busy || state.cleanupBusy) return
+    if (draft.dirty || state.saving) { requestExit('cleanup'); return }
+    stopCanvasKeys()
     state.cleanupExit = exitAfter; state.cleanup = null
     $('include-raw').checked = false; $('include-zero').checked = false
     $('cleanup-cancel').textContent = '取消清理'
@@ -758,10 +941,12 @@ export function createReviewApp(doc = document, win = window) {
   bind('search', () => { renderHome(); renderWall(); renderNav() }, 'input')
   bind('previous-group', () => moveGroup(-1)); bind('next-group', () => moveGroup(1))
   bind('previous-frame', () => moveFrame(-1)); bind('next-frame', () => moveFrame(1))
-  bind('keep-group', () => saveChanges(group().frames.map(frame => ({ frameId: frame.id, selected: true }))))
-  bind('reject-group', () => saveChanges(group().frames.map(frame => ({ frameId: frame.id, selected: false }))))
+  bind('keep-group', () => editChanges(group().frames.map(frame => ({ frameId: frame.id, selected: true }))))
+  bind('reject-group', () => editChanges(group().frames.map(frame => ({ frameId: frame.id, selected: false }))))
   bind('keep-frame', () => toggleCurrent(true)); bind('reject-frame', () => toggleCurrent(false))
-  bind('undo', () => saveChanges([], 'undo')); bind('restore', () => saveChanges([], 'restoreAutomatic'))
+  bind('undo', () => editChanges([], 'undo')); bind('restore', () => editChanges([], 'restoreAutomatic'))
+  bind('save-draft', saveDraft); bind('save-immersive', saveDraft)
+  bind('discard-draft', () => requestExit('discard'))
   bind('multiselect', () => { state.multi = !state.multi; $('multiselect').setAttribute('aria-pressed', String(state.multi)); renderFilmstrip() })
   bind('wall-toggle', () => {
     state.wallFull = !state.wallFull; $('wall-toggle').setAttribute('aria-pressed', String(state.wallFull))
@@ -774,20 +959,20 @@ export function createReviewApp(doc = document, win = window) {
     const open = $('review-drawer').classList.toggle('open'); $('drawer-toggle').setAttribute('aria-expanded', String(open)); drawLeaders()
   })
   bind('drawer-close', closeDrawer); bind('review-drawer', drawLeaders, 'scroll')
-  bind('help-button', () => { state.helpPinned = !state.helpPinned; if (state.helpPinned) showHelp(); else hideHelp() })
-  $('exit').addEventListener('pointerenter', () => showHelp())
-  $('exit').addEventListener('pointerleave', hideHelp)
-  $('exit').addEventListener('focus', () => showHelp())
-  $('exit').addEventListener('blur', hideHelp)
-  bind('exit', requestExit)
-  bind('continue-review', () => $('exit-dialog').close())
-  bind('exit-only', async () => {
-    if ($('remember-exit').checked && bridge.writable && !await preference('exit')) return
-    $('exit-dialog').close(); leave()
+  bind('exit', () => requestExit())
+  function cancelExit() {
+    if (state.exitIntent === 'close') bridge.closeResponse(state.closeId, false)
+    state.exitIntent = null; state.closeId = null
+    $('exit-dialog').close()
+  }
+  bind('continue-review', cancelExit)
+  $('exit-dialog').addEventListener('cancel', cancelExit)
+  bind('exit-save', async () => {
+    if (await saveDraft()) { $('exit-dialog').close(); finishExit() }
   })
-  bind('exit-cleanup', async () => {
-    if ($('remember-exit').checked && !await preference('cleanup')) return
-    $('exit-dialog').close(); beginCleanup(true)
+  bind('exit-discard', () => {
+    state.snapshot = draft.discard(); state.saveError = ''
+    $('exit-dialog').close(); repaintChoices(); finishExit()
   })
   bind('cleanup', () => beginCleanup(false))
   bind('reset-exit', async () => { if (await preference('ask')) setStatus('已重置退出偏好：退出时询问，不直接回收。') })
@@ -801,21 +986,76 @@ export function createReviewApp(doc = document, win = window) {
   bind('zero-cancel', () => { $('include-zero').checked = false; $('zero-dialog').close() })
   $('zero-dialog').addEventListener('cancel', () => { $('include-zero').checked = false })
   $('cleanup-dialog').addEventListener('cancel', event => { event.preventDefault(); cancelCleanup() })
+  const held = new Map()
+  let heldRaf = null, heldTime = 0
+  function stopCanvasKeys() { held.clear(); if (heldRaf !== null) win.cancelAnimationFrame(heldRaf); heldRaf = null }
+  function moveCanvas(actions, amount, elapsed = false) {
+    const current = frame(), stage = $('stage')
+    if (!current) return
+    const zoom = Number(actions.has('zoomIn')) - Number(actions.has('zoomOut'))
+    if (zoom) state.view = zoomAt(state.view, current, stage.clientWidth, stage.clientHeight,
+      stage.clientWidth / 2, stage.clientHeight / 2, state.view.scale *
+        (elapsed ? Math.exp(zoom * amount * .0007) : Math.pow(1.12, zoom)))
+    const dx = Number(actions.has('right')) - Number(actions.has('left'))
+    const dy = Number(actions.has('down')) - Number(actions.has('up'))
+    const length = Math.max(1, Math.hypot(dx, dy)), pixels = elapsed ? amount * .24 : 32
+    state.view = panView(state.view, current, stage.clientWidth, stage.clientHeight, dx * pixels / length, dy * pixels / length)
+    renderTransform()
+  }
+  function repeatCanvas(now) {
+    if ($('immersive').hidden || doc.querySelector('dialog[open]') || doc.visibilityState === 'hidden' ||
+        doc.activeElement?.closest?.('input,textarea,select,[contenteditable]:not([contenteditable="false"])')) {
+      stopCanvasKeys(); return
+    }
+    const delta = Math.min(50, Math.max(0, now - heldTime)); heldTime = now
+    const actions = new Set([...held.values()].filter(key => now - key.started >= 180).map(key => key.action))
+    if (actions.size) moveCanvas(actions, delta, true)
+    heldRaf = held.size ? win.requestAnimationFrame(repeatCanvas) : null
+  }
   doc.addEventListener('keydown', event => {
     if ($('immersive').hidden || doc.querySelector('dialog[open]')) return
+    const canvasAction = canvasShortcut(event)
+    if (canvasAction && !state.cleanupBusy) {
+      event.preventDefault()
+      const key = event.code || event.key
+      if (!event.repeat && !held.has(key)) {
+        held.set(key, { action: canvasAction, started: win.performance.now() })
+        moveCanvas(new Set([canvasAction]), 1)
+        if (heldRaf === null) { heldTime = win.performance.now(); heldRaf = win.requestAnimationFrame(repeatCanvas) }
+      }
+      return
+    }
     const action = shortcut(event)
     if (!action) return
     event.preventDefault()
-    if (state.busy || state.cleanupBusy) return
+    if (state.cleanupBusy) return
     const actions = { previousGroup: () => moveGroup(-1), nextGroup: () => moveGroup(1),
       previousFrame: () => moveFrame(-1), nextFrame: () => moveFrame(1),
       toggle: () => toggleCurrent(), keep: () => toggleCurrent(true), reject: () => toggleCurrent(false), exit: requestExit }
     actions[action]()
   })
+  doc.addEventListener('keyup', event => {
+    held.delete(event.code || event.key)
+    if (event.key === 'Control') for (const [key, value] of held) if (value.action.startsWith('zoom')) held.delete(key)
+    if (!held.size) stopCanvasKeys()
+  })
+  win.addEventListener('blur', () => { stopCanvasKeys(); releasePointers() })
+  doc.addEventListener('visibilitychange', () => { if (doc.visibilityState === 'hidden') { stopCanvasKeys(); releasePointers() } })
+  doc.addEventListener('focusin', event => {
+    if (event.target.closest?.('input,textarea,select,[contenteditable]:not([contenteditable="false"]),dialog')) stopCanvasKeys()
+  })
+  win.addEventListener('message', event => {
+    if (win.parent !== win && event.source === win.parent && ['null', 'file://'].includes(event.origin) &&
+        event.data?.type === 'birdshot-review-close-request' && typeof event.data.id === 'string') requestExit('close', event.data.id)
+  })
+  win.addEventListener('beforeunload', event => {
+    if (draft.dirty) { event.preventDefault(); event.returnValue = '' }
+  })
   const stage = $('stage')
   stage.addEventListener('wheel', event => {
     if (!event.ctrlKey || !frame() || event.target.closest('button,a')) return
     event.preventDefault()
+    stage.focus({ preventScroll: true })
     const bounds = stage.getBoundingClientRect()
     state.view = zoomAt(state.view, frame(), bounds.width, bounds.height, event.clientX - bounds.left, event.clientY - bounds.top,
       state.view.scale * Math.exp(-event.deltaY * .003))
@@ -823,6 +1063,7 @@ export function createReviewApp(doc = document, win = window) {
   }, { passive: false })
   stage.addEventListener('pointerdown', event => {
     if (!frame() || event.target.closest('button,a') || event.button !== 0) return
+    stage.focus({ preventScroll: true })
     state.pointers.set(event.pointerId, { x: event.clientX, y: event.clientY })
     stage.setPointerCapture(event.pointerId)
   })
@@ -846,12 +1087,15 @@ export function createReviewApp(doc = document, win = window) {
     }
     renderTransform()
   })
-  const release = event => { state.pointers.delete(event.pointerId) }
+  const release = event => {
+    state.pointers.delete(event.pointerId)
+    if (stage.hasPointerCapture(event.pointerId)) stage.releasePointerCapture(event.pointerId)
+  }
   stage.addEventListener('pointerup', release); stage.addEventListener('pointercancel', release); stage.addEventListener('lostpointercapture', release)
   const resize = new win.ResizeObserver(renderTransform)
   resize.observe(stage); resize.observe($('viewer-body'))
-  win.addEventListener('beforeunload', () => { progressive.stop(); bridge.dispose(); resize.disconnect() }, { once: true })
+  win.addEventListener('pagehide', () => { stopCanvasKeys(); progressive.stop(); bridge.dispose(); resize.disconnect() }, { once: true })
   refresh()
-  return { state, refresh, bridge, openGroup, leave }
+  return { state, draft, refresh, bridge, openGroup, leave }
 }
 if (typeof document !== 'undefined' && document.getElementById('review-app')) createReviewApp()

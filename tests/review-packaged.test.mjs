@@ -129,7 +129,8 @@ try {
   await reviewPage.waitForFunction(() => Number(document.getElementById('source-layer').dataset.scale) === 1)
   await reviewPage.locator('#exit').click()
   await reviewPage.locator('#exit-dialog[open]').waitFor()
-  await reviewPage.locator('#exit-only').click()
+  await reviewPage.locator('#exit-save').click()
+  await reviewPage.waitForFunction(() => document.getElementById('immersive').hidden)
   snapshot = await page.evaluate(() => window.birdshotDesktop.review('state', {}))
   snapshot = await page.evaluate(params => window.birdshotDesktop.review('decide', params), {
     expectedRevision: snapshot.revision, groupId: first.id,

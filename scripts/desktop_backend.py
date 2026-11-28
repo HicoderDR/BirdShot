@@ -868,6 +868,8 @@ class LibraryController:
         self.initialized = False
         self.library_initialized = False
         self.model_ready = False
+        self.cached_view_available = False
+        self.model_ready = False
         self.initialization_thread = None
         self.thread = None
         self.review = None
@@ -927,6 +929,8 @@ class LibraryController:
 
     def initialize(self):
         self.library_initialized = False
+        self.model_ready = False
+        self.cached_view_available = False
         self.startup_progress("sources", 0, len(self.sources))
         for index, source in enumerate(self.sources):
             self.startup_progress("sources", index, len(self.sources))
@@ -941,6 +945,35 @@ class LibraryController:
             self.sources_view = self.source_view()
         self.startup_progress("sources", len(self.sources), len(self.sources))
         self.output_root.mkdir(parents=True, exist_ok=True)
+        input_signature = self.review_input_signature()
+        self.review = ReviewStore(self.data, self.library)
+        cached = False
+        try:
+            cached = self.review.restore_registry(input_signature)
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            self.startup_progress("cache", 0, 1, warning="缓存未采用，保留原状态并重新检查：" + str(error))
+            print("Review cache unavailable: " + str(error), file=sys.stderr, flush=True)
+        previous_view = cached
+        if not cached and (self.library / "review.json").is_file():
+            try:
+                manifest = read_json(self.library / "manifest.json")
+                roots = {Path(source["path"]).resolve() for source in self.sources}
+                media_roots = {Path(job["path"]).resolve() for source in self.sources for job in source.get("jobs", [])}
+                media_roots.add(self.library.resolve())
+                if any(not any(Path(root).resolve().is_relative_to(registered) for registered in roots)
+                       for root in manifest.get("sourceRoots", [])) or \
+                        not {Path(root).resolve() for root in manifest.get("mediaRoots", [])}.issubset(media_roots):
+                    raise ValueError("Cached source/media roots are not registered in this library")
+                previous_view = self.review.publish_cached_projection()
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                self.startup_progress("cache", 0, 1, warning="旧视图未采用，等待重新检查：" + str(error))
+                print("Previous cached view unavailable: " + str(error), file=sys.stderr, flush=True)
+        if previous_view:
+            self.cached_view_available = True
+            if cached:
+                self.review.publish(cached=True)
+            self.startup_progress("cache", 1, 1, message="上次完成的内容已缓存，正在检查来源与模型；保存/清理尚不可用")
+            self.configure_service(**self.service_config)
         self.startup_progress("models", 0, 0)
         runtime = self.runtime_state(progress=self.startup_progress)
         self.model_ready = runtime["ready"]
@@ -953,8 +986,12 @@ class LibraryController:
         with self.lock:
             self.runtime = {**runtime, "ready": False, "status": "initializing"} if self.defer_initialization else runtime
         self.startup_progress("review-state", 0, 1)
-        self.review = ReviewStore(self.data, self.library)
-        self.rebuild(progress=self.startup_progress)
+        if cached:
+            self.review.validate_cached_sources(progress=self.startup_progress)
+            self.review.publish()
+            self.view_revision += 1
+        else:
+            self.rebuild(progress=self.startup_progress)
         self.startup_progress("review-state", 1, 1)
         if self.closed.is_set():
             return
@@ -966,6 +1003,35 @@ class LibraryController:
         if not self.defer_initialization:
             self.initialized = True
             self.startup_progress("ready", 1, 1, status="ready")
+
+    def review_input_signature(self):
+        def signature(path):
+            try:
+                info = Path(path).stat()
+                return [str(path), info.st_size, str(info.st_mtime_ns)]
+            except FileNotFoundError:
+                return [str(path), None]
+        inputs = []
+        for source in self.sources:
+            inputs.append([source["id"], source["path"], source.get("scanRequested", False), source.get("sourceIssues", [])])
+            for job in source.get("jobs", []):
+                root = Path(job["path"])
+                inputs.append(job)
+                for relative in ("manifest.json", "mapping.json", "metadata.json", "status.json",
+                                 "groups", "revisions/verified-birds-birder-v2/gallery.json",
+                                 "revisions/verified-birds-birder-v2/groups"):
+                    inputs.append(signature(root / relative))
+        for relative in ("manifest.json", "mapping.json", "groups.json", "metadata.json",
+                         "revisions/verified-birds-birder-v2/gallery.json"):
+            inputs.append(signature(self.library / relative))
+        policies = []
+        for path in (self.resources / "scripts" / "desktop_backend.py",
+                     self.resources / "scripts" / "review_store.py",
+                     self.resources / "scripts" / "batch_culling.py",
+                     self.resources / "assets-manifest.json"):
+            policies.append([path.name, hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None])
+        return hashlib.sha256(json.dumps({"version": 1, "inputs": inputs, "policies": policies},
+                                        sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
     def startup_progress(self, phase, processed=0, total=0, status="initializing", **extra):
         if self.closed.is_set():
@@ -1141,6 +1207,13 @@ class LibraryController:
         if progress:
             progress("review-publish", 0, 1)
         self.review.publish()
+        if not any(source.get("status") in {"queued", "processing"} for source in self.sources):
+            try:
+                if self.review.cache_path.exists() and read_json(self.review.cache_path).get("version") != 1:
+                    raise ValueError("Future cache schema preserved; no cached state overwritten")
+                self.review.cache_registry(self.review_input_signature())
+            except (OSError, ValueError, KeyError, TypeError) as error:
+                print("Review cache was not saved: " + str(error), file=sys.stderr, flush=True)
         self.view_revision += 1
         changed = False
         for error in gallery["sourceErrors"]:
@@ -1156,8 +1229,7 @@ class LibraryController:
                 or source["id"] == self.worker_source}
 
     def review_state(self):
-        self.review.refresh(self.review_busy_sources())
-        return self.review.publish()
+        return self.review.snapshot()
 
     def add_source(self, path):
         path = self.validate_source(path)
@@ -1504,7 +1576,12 @@ class LibraryController:
         with self.lock:
             self.initialized = False
             self.runtime.update(ready=False, status="error")
-            self.service.update(status="error", error=str(error), localUrl=None, lanUrls=[])
+            if self.cached_view_available and self.server and self.server.poll() is None:
+                self.service.update(status="cached" if self.service.get("localUrl") else "starting", error=str(error))
+            elif self.service.get("status") == "cached":
+                self.service.update(error=str(error))
+            else:
+                self.service.update(status="error", error=str(error), localUrl=None, lanUrls=[])
         self.startup_progress(self.startup["phase"], self.startup.get("processed", 0),
                               self.startup.get("total", 0), status="error", error=str(error))
         print("Desktop startup failed: " + str(error), file=sys.stderr, flush=True)
@@ -1518,7 +1595,7 @@ class LibraryController:
                 self.server = None
                 self.startup_failed("图库服务退出；详见 userData/logs/gallery-" + self.instance_id + ".log")
             return
-        if self.service["status"] != "starting":
+        if self.service["status"] not in {"starting", "cached"}:
             return
         try:
             opener = build_opener(ProxyHandler({}))
@@ -1541,17 +1618,21 @@ class LibraryController:
                 return
             if self.server is not server or self.closed.is_set():
                 return
+            validated = self.library_initialized and (self.model_ready or not self.defer_initialization)
+            if self.service["status"] == "cached" and not validated:
+                return
             with self.lock:
-                self.service.update(status="ready", localUrl=f"http://127.0.0.1:{port}/",
+                self.service.update(status="ready" if validated else "cached", localUrl=f"http://127.0.0.1:{port}/",
                                     lanUrls=self.lan_urls(self.service_config["mode"], port,
                                                           self.service_config.get("lanIp")))
                 self.service.pop("warning", None)
-                self.service.pop("error", None)
-                if self.defer_initialization:
+                if validated:
+                    self.service.pop("error", None)
+                if self.defer_initialization and validated:
                     self.initialized = True
                     self.runtime.update(ready=self.model_ready, status="ready")
             self.changed()
-            if self.defer_initialization:
+            if self.defer_initialization and validated:
                 self.startup_progress("ready", 1, 1, status="ready")
                 self.emit({"event": "ready", "instanceId": self.instance_id, "state": self.state()})
         except (OSError, ValueError):
@@ -1601,12 +1682,12 @@ class LibraryController:
         with self.action_lock:
             if not allowed() or self.closed.is_set():
                 raise RuntimeError("初始化中或控制器已关闭")
-            if action.startswith("review_"):
+            if action.startswith("review_") and action not in {"review_state", "review_save"}:
                 self.review.refresh(self.review_busy_sources())
             actions = {"state": lambda: self.state(), "add_source": self.add_source, "attach_job": self.attach_job,
                        "remove_source": lambda id: self.remove_source(id), "rescan": lambda id: self.rescan(id),
                        "configure_service": self.configure_service, "set_output": self.set_output,
-                       "review_state": self.review_state, "review_decide": self.review.decide,
+                       "review_state": self.review_state, "review_decide": self.review.decide, "review_save": self.review.save,
                        "review_preferences": self.review.preferences,
                        "review_cleanup_preview": self.review.cleanup_preview,
                        "review_cleanup_claim": self.review.cleanup_claim,
@@ -1670,7 +1751,7 @@ class LibraryController:
             if self.closed.is_set():
                 raise RuntimeError("控制器已关闭，不能重试启动")
             if self.initialization_thread and self.initialization_thread.is_alive() or self.server and \
-                    self.service["status"] == "starting" or self.initialized:
+                    self.service["status"] == "starting" and self.startup["status"] != "error" or self.initialized:
                 return self.state()
             self.started_at = time.monotonic()
             self.runtime.update(ready=False, status="initializing")
@@ -1690,7 +1771,8 @@ class LibraryController:
                 if self.closed.is_set():
                     return
                 self.startup_progress("service", 0, 1)
-                service = self.configure_service(**self.service_config)
+                service = self.service if self.server and self.service["status"] in {"starting", "cached", "ready"} else \
+                    self.configure_service(**self.service_config)
                 if service["status"] == "error":
                     self.startup_failed(service.get("error", "图库服务启动失败"))
         except Exception as error:
